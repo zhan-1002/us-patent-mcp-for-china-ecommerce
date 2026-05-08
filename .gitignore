@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Test results
+.pytest_cache
+
+# Jupyter-generated files
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv
+
+# OS specific files
+.DS_Store
+
+# Configuration files
+.env
+
+# Claude Code
+.claude
