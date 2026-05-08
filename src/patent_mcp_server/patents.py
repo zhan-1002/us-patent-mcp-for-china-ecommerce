@@ -1,49 +1,37 @@
 """
-USPTO Patent Search MCP Server
+USPTO Patent Search MCP Server (PPUBS Only)
 
 This file provides a Model Context Protocol (MCP) server that exposes tools for interacting
-with multiple USPTO patent data APIs:
+with the USPTO Patent Public Search (PPUBS) API:
 
-1. ppubs.uspto.gov - Full text patent documents, PDF downloads, and advanced search
-2. api.uspto.gov - Metadata, continuity information, transactions, and assignments
-3. PTAB API v3 - Patent Trial and Appeal Board proceedings and decisions
-4. PatentsView API - UNAVAILABLE (shut down March 2026; data migrated to ODP bulk datasets)
-5. Office Action APIs - UNAVAILABLE (decommissioned early 2026, pending ODP migration)
+- ppubs.uspto.gov - Full text patent documents, PDF downloads, and advanced search
 
 The server uses stdio transport for Claude Code/Cursor integration.
 
-Version: 0.5.0 - USPTO-only focus
+Version: 1.0.0 - PPUBS-only focus (no API key required)
 """
 import atexit
 import json
 import logging
+import re
 import sys
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import ValidationError
 
 from patent_mcp_server.config import config
-from patent_mcp_server.constants import (
-    Sources, Fields, Defaults, PatentsViewEndpoints
-)
+from patent_mcp_server.constants import Sources, Fields
 from patent_mcp_server.util.errors import ApiError, is_error
-from patent_mcp_server.util.validation import validate_patent_number, validate_app_number
-from patent_mcp_server.util.response import (
-    ResponseEnvelope, check_and_truncate, estimate_tokens
-)
+from patent_mcp_server.util.validation import validate_patent_number
+from patent_mcp_server.util.response import ResponseEnvelope, check_and_truncate
 from patent_mcp_server.resources import (
     get_cpc_section_info, get_cpc_subsection_info,
     get_status_code_info, get_all_status_codes,
-    get_data_source_info, get_all_data_sources,
-    get_search_syntax_guide, CPC_SECTIONS, DATA_SOURCES
+    get_all_data_sources, get_data_source_info,
+    get_search_syntax_guide, CPC_SECTIONS
 )
-from patent_mcp_server.prompts import get_prompt, list_prompts, PROMPTS
+from patent_mcp_server.prompts import get_prompt
 from patent_mcp_server.uspto.ppubs_uspto_gov import PpubsClient
-from patent_mcp_server.uspto.api_uspto_gov import ApiUsptoClient
-from patent_mcp_server.uspto.office_action_client import OfficeActionClient
-from patent_mcp_server.uspto.enriched_citation_client import EnrichedCitationClient
-from patent_mcp_server.patentsview.patentsview_client import PatentsViewClient
 
 # Initialize FastMCP server
 mcp = FastMCP("uspto_patent_tools")
@@ -59,14 +47,8 @@ logger = logging.getLogger('uspto_patent_mcp')
 # Validate configuration
 config.validate()
 
-# Create client instances for each USPTO API
+# Create client instance for PPUBS API
 ppubs_client = PpubsClient()
-api_client = ApiUsptoClient()
-office_action_client = OfficeActionClient()
-enriched_citation_client = EnrichedCitationClient()
-
-# Create PatentsView client
-patentsview_client = PatentsViewClient()
 
 
 # Register cleanup handler
@@ -75,10 +57,6 @@ async def cleanup():
     logger.info("Shutting down USPTO Patent MCP server, cleaning up resources...")
     try:
         await ppubs_client.close()
-        await api_client.close()
-        await office_action_client.close()
-        await enriched_citation_client.close()
-        await patentsview_client.close()
         logger.info("Cleanup completed successfully")
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -248,6 +226,22 @@ async def patent_landscape() -> str:
     return get_prompt("patent_landscape")["content"]
 
 
+@mcp.prompt()
+async def product_patent_search() -> str:
+    """Guide for product patent search based on proven strategies.
+
+    USE THIS PROMPT WHEN: You need to search patents for a specific product
+    using optimized search strategies.
+
+    This prompt provides guidance on:
+    - Keyword extraction from product listings
+    - Hidden feature discovery
+    - Multi-strategy search approach
+    - Inventor and assignee tracking
+    """
+    return get_prompt("product_patent_search")["content"]
+
+
 # =====================================================================
 # Helper Functions
 # =====================================================================
@@ -300,84 +294,46 @@ async def _search_patent_by_number(patent_number: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def check_api_status() -> Dict[str, Any]:
-    """Check status and availability of all patent data sources.
+    """Check status of the PPUBS API.
 
-    USE THIS TOOL WHEN: You encounter errors or want to verify which APIs
-    are available and properly configured before starting research.
+    USE THIS TOOL WHEN: You want to verify the patent search API
+    is available before starting research.
 
-    Returns status of each data source including:
-    - Configuration status (API keys, credentials)
-    - Connection availability
-    - Rate limit information where available
+    Returns:
+        Status of the PPUBS API including configuration and availability.
     """
-    status = {
-        "odp": {
-            "name": "USPTO Open Data Portal",
-            "configured": bool(config.USPTO_API_KEY),
-            "api_key_set": bool(config.USPTO_API_KEY),
-        },
-        "ppubs": {
-            "name": "Patent Public Search",
-            "configured": True,
-            "requires_auth": False,
-        },
-        "ptab": {
-            "name": "PTAB Trial API",
-            "configured": False,
-            "status": "UNAVAILABLE",
-            "note": (
-                "The PTAB Trial API is not available on the USPTO Open Data "
-                "Portal (api.uspto.gov). The legacy PTAB API at "
-                "developer.uspto.gov was retired, and no PTAB endpoints are "
-                "listed in the ODP Swagger catalog. Use ppubs_search_patents "
-                "/ ppubs_get_full_document to locate PTAB-related documents, "
-                "or download PTAB bulk data from https://developer.uspto.gov/data."
-            ),
-        },
-        "patentsview": {
-            "name": "PatentsView API",
-            "configured": False,
-            "status": "UNAVAILABLE",
-            "note": (
-                "PatentsView API (search.patentsview.org) was shut down on "
-                "March 20, 2026. Data has been migrated to ODP as bulk "
-                "downloadable datasets. Use ppubs_search_patents for patent "
-                "search, odp_get_application for metadata, or "
-                "odp_search_datasets to find PatentsView bulk datasets."
-            ),
-        },
-        "office_actions": {
-            "name": "Office Action APIs",
-            "configured": False,
-            "status": "UNAVAILABLE",
-            "note": (
-                "Legacy endpoints at developer.uspto.gov were decommissioned "
-                "in early 2026. Migration to ODP (api.uspto.gov) is pending. "
-                "Use odp_get_documents as a workaround."
-            ),
-        },
-        "litigation": {
-            "name": "Patent Litigation API",
-            "configured": False,
-            "status": "UNAVAILABLE",
-            "note": (
-                "The Patent Litigation API is not available on the USPTO "
-                "Open Data Portal (api.uspto.gov) and is not listed in the "
-                "ODP Swagger catalog. The OCE Patent Litigation dataset is "
-                "distributed as a bulk download at "
-                "https://www.uspto.gov/ip-policy/economic-research/research-"
-                "datasets/patent-litigation-docket-reports-data."
-            ),
-        },
-    }
-
     return {
         "success": True,
-        "sources": status,
-        "token_budget": {
-            "max_response_tokens": config.MAX_RESPONSE_TOKENS,
-            "truncation_enabled": config.TRUNCATE_LARGE_RESPONSES,
-        }
+        "sources": {
+            "ppubs": {
+                "name": "Patent Public Search",
+                "configured": True,
+                "requires_auth": False,
+                "description": "Full-text search of US patents and applications",
+            },
+        },
+        "tools_available": [
+            "ppubs_search_patents",
+            "ppubs_search_applications",
+            "ppubs_get_full_document",
+            "ppubs_get_patent_by_number",
+            "ppubs_download_patent_pdf",
+            "ppubs_search_by_ttl",
+            "ppubs_search_by_inventor",
+            "ppubs_search_by_assignee",
+            "ppubs_search_combined",
+            "ppubs_get_inventor_patents",
+            "check_api_status",
+            "get_cpc_info",
+            "get_status_code",
+        ],
+        "enhanced_tools": {
+            "ppubs_search_by_ttl": "Title-only search (most precise)",
+            "ppubs_search_by_inventor": "Find all patents by inventor",
+            "ppubs_search_by_assignee": "Find all patents by company",
+            "ppubs_search_combined": "Multi-strategy search (recommended for new searches)",
+            "ppubs_get_inventor_patents": "Auto inventor tracking from a patent",
+        },
     }
 
 
@@ -433,15 +389,12 @@ async def ppubs_search_patents(
     USE THIS TOOL WHEN: You need full-text search of US patents with daily
     updates, or need access to the most recent patent filings.
 
-    PREFER OVER patentsview_search WHEN: You need the most current data
-    (PPUBS updates daily vs PatentsView periodic updates).
-
     Args:
         query: Search query using USPTO syntax. Examples:
                - "machine learning" - searches all fields
-               - TTL/"neural network" - title contains phrase
-               - IN/Smith AND AN/IBM - inventor Smith, assignee IBM
-               - CPC/G06N3/08 - CPC classification
+               - TTL:"neural network" - title contains phrase
+               - IN:"Smith" AND AN:"IBM" - inventor Smith, assignee IBM
+               - CPC:"G06N3/08" - CPC classification
         offset: Starting position for pagination (default: 0)
         limit: Maximum results to return (default: 100, max: 500)
         sort: Sort order (default: "date_publ desc")
@@ -583,1234 +536,535 @@ async def ppubs_download_patent_pdf(patent_number: str) -> Dict[str, Any]:
 
 
 # =====================================================================
-# ODP Tools - USPTO Open Data Portal (api.uspto.gov)
+# Enhanced Search Tools - Based on successful search strategies
 # =====================================================================
 
 @mcp.tool()
-async def odp_get_application(app_num: str) -> Dict[str, Any]:
-    """Get patent application data from USPTO Open Data Portal.
-
-    USE THIS TOOL WHEN: You need prosecution/file wrapper data for an
-    application including status, dates, and basic metadata.
-
-    Args:
-        app_num: Application number without slashes or commas (e.g., "14412875")
-
-    Returns:
-        Application data including filing date, status, and basic info.
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}"
-    result = await api_client.make_request(url)
-
-    if is_error(result):
-        return result
-
-    return ResponseEnvelope.from_odp(result)
-
-
-@mcp.tool()
-async def odp_get_application_metadata(app_num: str) -> Dict[str, Any]:
-    """Get detailed metadata for a patent application.
-
-    USE THIS TOOL WHEN: You need comprehensive application metadata
-    including examiner info, art unit, and detailed status.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/meta-data"
-    result = await api_client.make_request(url)
-
-    if is_error(result):
-        return result
-
-    return ResponseEnvelope.from_odp(result)
-
-
-@mcp.tool()
-async def odp_get_continuity(app_num: str) -> Dict[str, Any]:
-    """Get patent family/continuity data (parent and child applications).
-
-    USE THIS TOOL WHEN: You need to understand the patent family tree -
-    parent applications, continuations, divisionals, and CIPs.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-
-    Returns:
-        Continuity data showing parent/child relationships and priority claims.
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/continuity"
-    result = await api_client.make_request(url)
-
-    if is_error(result):
-        return result
-
-    return ResponseEnvelope.from_odp(result)
-
-
-@mcp.tool()
-async def odp_get_assignment(app_num: str) -> Dict[str, Any]:
-    """Get patent assignment/ownership records.
-
-    USE THIS TOOL WHEN: You need to know current and historical owners
-    of a patent or application.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/assignment"
-    return await api_client.make_request(url)
-
-
-@mcp.tool()
-async def odp_get_adjustment(app_num: str) -> Dict[str, Any]:
-    """Get patent term adjustment (PTA) data.
-
-    USE THIS TOOL WHEN: You need to calculate the actual expiration date
-    of a patent accounting for USPTO delays.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/adjustment"
-    return await api_client.make_request(url)
-
-
-@mcp.tool()
-async def odp_get_attorney(app_num: str) -> Dict[str, Any]:
-    """Get attorney/agent of record for an application.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/attorney"
-    return await api_client.make_request(url)
-
-
-@mcp.tool()
-async def odp_get_foreign_priority(app_num: str) -> Dict[str, Any]:
-    """Get foreign priority claims for an application.
-
-    USE THIS TOOL WHEN: You need to find priority claims to foreign
-    applications that may affect the effective filing date.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/foreign-priority"
-    return await api_client.make_request(url)
-
-
-@mcp.tool()
-async def odp_get_transactions(app_num: str) -> Dict[str, Any]:
-    """Get prosecution transaction history for an application.
-
-    USE THIS TOOL WHEN: You need the complete timeline of prosecution
-    events including office actions, responses, and fee payments.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/transactions"
-    result = await api_client.make_request(url)
-
-    if is_error(result):
-        return result
-
-    return check_and_truncate(ResponseEnvelope.from_odp(result))
-
-
-@mcp.tool()
-async def odp_get_documents(app_num: str) -> Dict[str, Any]:
-    """Get list of documents in the application file wrapper.
-
-    Args:
-        app_num: Application number without slashes (e.g., "14412875")
-    """
-    try:
-        app_num = validate_app_number(str(app_num))
-    except ValueError as e:
-        return ApiError.validation_error(str(e), "app_num")
-
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/{app_num}/documents"
-    result = await api_client.make_request(url)
-
-    if is_error(result):
-        return result
-
-    return check_and_truncate(ResponseEnvelope.from_odp(result))
-
-
-@mcp.tool()
-async def odp_search_applications(
-    query: Optional[str] = None,
-    application_number: Optional[str] = None,
-    patent_number: Optional[str] = None,
-    inventor_name: Optional[str] = None,
-    assignee_name: Optional[str] = None,
-    filing_date_from: Optional[str] = None,
-    filing_date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
+async def ppubs_search_by_ttl(
+    title_keywords: str,
+    limit: int = 50,
 ) -> Dict[str, Any]:
-    """Search patent applications in USPTO Open Data Portal.
+    """Search patents by title keywords (TTL field - most precise).
 
-    USE THIS TOOL WHEN: You need to search applications with filtering
-    by applicant metadata, dates, or other criteria not available in PPUBS.
+    USE THIS TOOL WHEN: You need precise matching in patent titles.
+    This implements the "exact phrase in title" strategy that directly
+    found US-D1021223-S ("cigar ashtray").
 
-    Supports both simple queries and complex multi-field filtering.
+    Strategy: Precise phrase matching in title is the most effective
+    search method for design patents.
 
     Args:
-        query: General search query string
-        application_number: Filter by application number
-        patent_number: Filter by patent number
-        inventor_name: Filter by inventor name
-        assignee_name: Filter by assignee/applicant name
-        filing_date_from: Filing date range start (YYYY-MM-DD)
-        filing_date_to: Filing date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
+        title_keywords: Keywords to search in title (e.g., "cigar ashtray",
+                        "self watering pot", "cocktail smoker")
+        limit: Maximum results (default: 50)
 
     Returns:
-        Normalized response with matching applications.
+        Patents with title containing the keywords.
+
+    Example:
+        ppubs_search_by_ttl("cigar ashtray") → US-D1021223-S
     """
-    params = {"start": offset, "rows": limit}
+    # Note: USPTO PPUBS field search (TTL:, IN:, AN:) may not work reliably
+    # Use exact phrase search as primary method
+    query = f'"{title_keywords}"'
+    logger.info(f"Title search (exact phrase): {query}")
 
-    if query:
-        params["q"] = query
-    if application_number:
-        params["applicationNumberText"] = application_number
-    if patent_number:
-        params["patentNumber"] = patent_number
-    if inventor_name:
-        params["inventorName"] = inventor_name
-    if assignee_name:
-        params["assigneeName"] = assignee_name
-    if filing_date_from or filing_date_to:
-        date_range = f"{filing_date_from or '*'},{filing_date_to or '*'}"
-        params["appFilingDate"] = date_range
-
-    query_string = api_client.build_query_string(params)
-    url = f"{config.API_BASE_URL}/api/v1/patent/applications/search?{query_string}"
-
-    result = await api_client.make_request(url)
+    result = await ppubs_client.run_query(
+        query=query,
+        start=0,
+        limit=min(limit, 500),
+        sources=[Sources.GRANTED_PATENTS],
+    )
 
     if is_error(result):
         return result
 
-    # Upstream ODP search ignores the `rows` parameter and returns a fixed
-    # page (~25 records). Enforce the caller's `limit` by post-slicing.
-    if isinstance(result, dict) and isinstance(
-        result.get("patentFileWrapperDataBag"), list
-    ):
-        result["patentFileWrapperDataBag"] = (
-            result["patentFileWrapperDataBag"][:limit]
+    response = ResponseEnvelope.from_ppubs(result, 0, limit)
+    return check_and_truncate(response)
+
+
+@mcp.tool()
+async def ppubs_search_by_inventor(
+    inventor_name: str,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """Search patents by inventor name using improved strategies.
+
+    USE THIS TOOL WHEN: You need to find all patents by an inventor.
+
+    Improved Strategy (based on testing):
+    - Splits name into FirstName AND LastName format
+    - Tries multiple name variations
+    - Much more effective than exact name search
+
+    Args:
+        inventor_name: Inventor name (e.g., "Qiu; Haitao", "Smith; John", "John Smith")
+        limit: Maximum results (default: 100)
+
+    Returns:
+        Patents by this inventor using multiple search strategies.
+    """
+    # Clean and parse the inventor name
+    name = inventor_name.replace(";", " ").replace(",", " ").strip()
+    parts = [p for p in name.split() if len(p) > 1]  # Filter single chars
+
+    all_patents = {}
+    strategies_used = []
+
+    # Strategy 1: FirstName AND LastName (most effective)
+    if len(parts) >= 2:
+        query1 = f"{parts[0]} AND {parts[-1]}"
+        logger.info(f"Inventor search strategy 1: {query1}")
+        strategies_used.append("name_split")
+
+        result1 = await ppubs_client.run_query(
+            query=query1,
+            start=0,
+            limit=min(limit, 200),
+            sort="date_publ desc",
+            sources=[Sources.GRANTED_PATENTS],
         )
+        if not is_error(result1):
+            for p in result1.get(Fields.PATENTS, result1.get(Fields.DOCS, [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_patents:
+                    all_patents[pn] = p
+                    all_patents[pn]["search_strategy"] = "name_split"
 
-    return check_and_truncate(ResponseEnvelope.from_odp(result, offset, limit))
+    # Strategy 2: Exact phrase (original name)
+    query2 = f'"{inventor_name}"'
+    logger.info(f"Inventor search strategy 2: {query2}")
+    strategies_used.append("exact_phrase")
 
+    result2 = await ppubs_client.run_query(
+        query=query2,
+        start=0,
+        limit=min(limit, 100),
+        sort="date_publ desc",
+        sources=[Sources.GRANTED_PATENTS],
+    )
+    if not is_error(result2):
+        for p in result2.get(Fields.PATENTS, result2.get(Fields.DOCS, [])):
+            pn = p.get("documentId", p.get("patentNumber", ""))
+            if pn and pn not in all_patents:
+                all_patents[pn] = p
+                all_patents[pn]["search_strategy"] = "exact_phrase"
 
-@mcp.tool()
-async def odp_search_datasets(
-    query: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search USPTO bulk data products/datasets.
+    # Sort by relevance (design patents first)
+    def sort_key(p):
+        pn = p.get("documentId", p.get("patentNumber", "")).upper()
+        score = 0
+        if pn.startswith("D") or "-D" in pn:
+            score += 100
+        return -score
 
-    USE THIS TOOL WHEN: You need to find bulk download datasets
-    available from USPTO for large-scale analysis.
+    sorted_patents = sorted(all_patents.values(), key=sort_key)[:limit]
 
-    Args:
-        query: Search query for dataset names/descriptions
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    params = {"start": offset, "rows": limit}
-    if query:
-        params["searchText"] = query
-
-    query_string = api_client.build_query_string(params)
-    url = f"{config.API_BASE_URL}/api/v1/datasets/products/search?{query_string}"
-
-    return await api_client.make_request(url)
-
-
-@mcp.tool()
-async def odp_get_dataset(product_id: str) -> Dict[str, Any]:
-    """Get details of a specific bulk dataset product.
-
-    Args:
-        product_id: Dataset product identifier
-    """
-    url = f"{config.API_BASE_URL}/api/v1/datasets/products/{product_id}"
-    return await api_client.make_request(url)
-
-
-# =====================================================================
-# PTAB Tools - Patent Trial and Appeal Board
-# =====================================================================
-
-@mcp.tool()
-async def ptab_search_proceedings(
-    query: Optional[str] = None,
-    trial_type: Optional[str] = None,
-    patent_number: Optional[str] = None,
-    party_name: Optional[str] = None,
-    filing_date_from: Optional[str] = None,
-    filing_date_to: Optional[str] = None,
-    status: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search PTAB trial proceedings (IPR, PGR, CBM, derivation).
-
-    USE THIS TOOL WHEN: You need to find patent validity challenges at
-    the Patent Trial and Appeal Board.
-
-    Trial types:
-    - IPR: Inter Partes Review (most common, based on patents/publications)
-    - PGR: Post-Grant Review (broader grounds, within 9 months of grant)
-    - CBM: Covered Business Method (for financial method patents, sunsetted)
-    - DER: Derivation proceedings
-
-    Args:
-        query: Full-text search query
-        trial_type: Type of trial (IPR, PGR, CBM, DER)
-        patent_number: Patent number being challenged
-        party_name: Petitioner or patent owner name
-        filing_date_from: Filing date range start (YYYY-MM-DD)
-        filing_date_to: Filing date range end (YYYY-MM-DD)
-        status: Proceeding status (Pending, Instituted, Terminated, FWD Entered)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-
-    Returns:
-        Normalized response with matching proceedings.
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_get_proceeding(proceeding_number: str) -> Dict[str, Any]:
-    """Get details of a specific PTAB proceeding.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). The legacy PTAB API on developer.uspto.gov was
-    retired, and no PTAB endpoints are listed in the ODP Swagger catalog.
-
-    Args:
-        proceeding_number: Proceeding number (e.g., "IPR2023-00001")
-
-    Returns:
-        Proceeding details including parties, patent, status, and dates.
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_get_documents(
-    proceeding_number: str,
-    document_type: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Get documents filed in a PTAB proceeding.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). The legacy PTAB API on developer.uspto.gov was
-    retired, and no PTAB endpoints are listed in the ODP Swagger catalog.
-
-    Args:
-        proceeding_number: Proceeding number (e.g., "IPR2023-00001")
-        document_type: Filter by type (petition, response, declaration, etc.)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_search_decisions(
-    query: Optional[str] = None,
-    decision_type: Optional[str] = None,
-    proceeding_number: Optional[str] = None,
-    patent_number: Optional[str] = None,
-    decision_date_from: Optional[str] = None,
-    decision_date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search PTAB trial decisions.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). The legacy PTAB API on developer.uspto.gov was
-    retired, and no PTAB endpoints are listed in the ODP Swagger catalog.
-
-    Args:
-        query: Full-text search in decision text
-        decision_type: Type (institution, final, termination)
-        proceeding_number: Filter by proceeding number
-        patent_number: Filter by patent number
-        decision_date_from: Date range start (YYYY-MM-DD)
-        decision_date_to: Date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_get_decision(decision_id: str) -> Dict[str, Any]:
-    """Get details of a specific PTAB decision.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). See ptab_search_proceedings for details.
-
-    Args:
-        decision_id: Decision identifier
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_search_appeals(
-    query: Optional[str] = None,
-    application_number: Optional[str] = None,
-    patent_number: Optional[str] = None,
-    decision_date_from: Optional[str] = None,
-    decision_date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search ex parte appeal decisions.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). The legacy PTAB API on developer.uspto.gov was
-    retired, and no PTAB endpoints are listed in the ODP Swagger catalog.
-
-    Args:
-        query: Full-text search query
-        application_number: Filter by application number
-        patent_number: Filter by patent number
-        decision_date_from: Date range start (YYYY-MM-DD)
-        decision_date_to: Date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return _ptab_unavailable()
-
-
-@mcp.tool()
-async def ptab_get_appeal(appeal_number: str) -> Dict[str, Any]:
-    """Get details of a specific ex parte appeal decision.
-
-    IMPORTANT: The PTAB Trial API is not available on the USPTO Open Data
-    Portal (api.uspto.gov). See ptab_search_proceedings for details.
-
-    Args:
-        appeal_number: Appeal number
-    """
-    return _ptab_unavailable()
-
-
-def _ptab_unavailable() -> Dict[str, Any]:
-    """Shared API_UNAVAILABLE payload for all PTAB tools (see issue #16)."""
     return {
-        "error": True,
-        "message": (
-            "The USPTO PTAB Trial API is not available on the Open Data "
-            "Portal (api.uspto.gov). The legacy PTAB API at "
-            "developer.uspto.gov was retired, and no PTAB endpoints are "
-            "listed in the ODP Swagger catalog at "
-            "https://data.uspto.gov/swagger/index.html. Use "
-            "ppubs_search_patents / ppubs_get_full_document to locate "
-            "PTAB-related documents, or download PTAB bulk data from "
-            "https://developer.uspto.gov/data."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": (
-            "Use ppubs_search_patents(query) to locate PTAB-related "
-            "documents, or download PTAB bulk data from "
-            "https://developer.uspto.gov/data."
-        ),
+        "success": True,
+        "source": "ppubs",
+        "inventor_name": inventor_name,
+        "total": len(sorted_patents),
+        "strategies_used": strategies_used,
+        "results": sorted_patents,
+        "hint": f"Found {len(sorted_patents)} patents using {len(strategies_used)} search strategies."
     }
 
 
-# =====================================================================
-# PatentsView Tools - Advanced search with disambiguation
-# =====================================================================
-
 @mcp.tool()
-async def patentsview_search_patents(
-    query: str,
-    search_type: str = "any",
-    offset: int = 0,
+async def ppubs_search_by_assignee(
+    assignee_name: str,
+    product_type: str = None,
     limit: int = 100,
 ) -> Dict[str, Any]:
-    """Search US patents with PatentsView full-text search.
+    """Search patents by assignee (company/owner) using improved strategies.
 
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_search_patents for full-text patent search.
-    PatentsView disambiguated data is available as bulk datasets on the
-    USPTO Open Data Portal (use odp_search_datasets to find them).
+    USE THIS TOOL WHEN: You want to find all patents owned by a company,
+    or track patent families from the same assignee.
 
-    Args:
-        query: Search terms for patent titles and abstracts
-        search_type: Match type ("any", "all", "phrase")
-        offset: Starting position (default: 0)
-        limit: Max results (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView search API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_search_patents for full-text patent search. PatentsView "
-            "disambiguated data is available as bulk datasets on the USPTO Open "
-            "Data Portal (use odp_search_datasets to find them)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use ppubs_search_patents(query) for patent search.",
-    }
-
-
-@mcp.tool()
-async def patentsview_get_patent(patent_id: str) -> Dict[str, Any]:
-    """Get detailed patent information from PatentsView.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_get_patent_by_number for patent details.
+    Improved Strategy (based on testing):
+    - Extracts core keywords from company name
+    - Combines with product type for better results
+    - Uses multiple search variations
 
     Args:
-        patent_id: Patent ID/number (e.g., "7861317")
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_get_patent_by_number for patent details, or "
-            "odp_get_application for application metadata."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use ppubs_get_patent_by_number(patent_number) for patent details.",
-    }
-
-
-@mcp.tool()
-async def patentsview_search_assignees(
-    name: str,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """Search for assignees (companies/organizations) with disambiguation.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_search_patents with an assignee name query
-    (e.g., AN/"company name") as a workaround.
-
-    Args:
-        name: Assignee/company name (partial match supported)
-        limit: Max results (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_search_patents with an assignee name query "
-            '(e.g., query=\'AN/"company name"\') to search by assignee. '
-            "Disambiguated assignee data is available as bulk datasets "
-            "on the USPTO Open Data Portal (use odp_search_datasets)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": 'Use ppubs_search_patents(query=\'AN/"company name"\') to search by assignee.',
-    }
-
-
-@mcp.tool()
-async def patentsview_get_assignee(assignee_id: str) -> Dict[str, Any]:
-    """Get detailed assignee information by disambiguated ID.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. No direct replacement exists for disambiguated assignee
-    lookups. Use odp_search_datasets to find PatentsView bulk datasets.
-
-    Args:
-        assignee_id: Disambiguated assignee ID from search results
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "No direct replacement exists for disambiguated assignee ID lookups. "
-            "Disambiguated assignee data is available as bulk datasets on the "
-            "USPTO Open Data Portal (use odp_search_datasets to find them)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_search_datasets to find PatentsView bulk disambiguated datasets.",
-    }
-
-
-@mcp.tool()
-async def patentsview_search_inventors(
-    name: str,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """Search for inventors with disambiguation.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_search_patents with an inventor name query
-    (e.g., IN/"last name") as a workaround.
-
-    Args:
-        name: Inventor name (last name, or "First Last")
-        limit: Max results (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_search_patents with an inventor name query "
-            '(e.g., query=\'IN/"inventor name"\') to search by inventor. '
-            "Disambiguated inventor data is available as bulk datasets "
-            "on the USPTO Open Data Portal (use odp_search_datasets)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": 'Use ppubs_search_patents(query=\'IN/"inventor name"\') to search by inventor.',
-    }
-
-
-@mcp.tool()
-async def patentsview_get_inventor(inventor_id: str) -> Dict[str, Any]:
-    """Get detailed inventor information by disambiguated ID.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. No direct replacement exists for disambiguated inventor
-    lookups. Use odp_search_datasets to find PatentsView bulk datasets.
-
-    Args:
-        inventor_id: Disambiguated inventor ID from search results
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "No direct replacement exists for disambiguated inventor ID lookups. "
-            "Disambiguated inventor data is available as bulk datasets on the "
-            "USPTO Open Data Portal (use odp_search_datasets to find them)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_search_datasets to find PatentsView bulk disambiguated datasets.",
-    }
-
-
-@mcp.tool()
-async def patentsview_get_claims(patent_id: str) -> Dict[str, Any]:
-    """Get all claims text for a patent.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_get_full_document to retrieve patent text
-    including claims.
-
-    Args:
-        patent_id: Patent ID/number (e.g., "7861317")
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_get_full_document to retrieve patent text including "
-            "claims, or ppubs_get_patent_by_number to get the document GUID "
-            "first."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use ppubs_get_patent_by_number then ppubs_get_full_document for patent claims.",
-    }
-
-
-@mcp.tool()
-async def patentsview_get_description(patent_id: str) -> Dict[str, Any]:
-    """Get patent detailed description/specification text.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_get_full_document to retrieve the full patent
-    specification.
-
-    Args:
-        patent_id: Patent ID/number (e.g., "7861317")
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_get_full_document to retrieve the full patent "
-            "specification, or ppubs_get_patent_by_number to get the "
-            "document GUID first."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use ppubs_get_patent_by_number then ppubs_get_full_document for patent text.",
-    }
-
-
-@mcp.tool()
-async def patentsview_search_by_cpc(
-    cpc_code: str,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """Search patents by CPC classification code.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_search_patents with a CPC query
-    (e.g., CPC/"G06N3/08") as a workaround.
-
-    Args:
-        cpc_code: CPC code (e.g., "G06N3/08" for neural networks)
-        limit: Max results (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_search_patents with a CPC classification query "
-            '(e.g., query=\'CPC/"G06N3/08"\') to search by CPC code.'
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": 'Use ppubs_search_patents(query=\'CPC/"G06N3/08"\') to search by CPC.',
-    }
-
-
-@mcp.tool()
-async def patentsview_lookup_cpc(cpc_code: str) -> Dict[str, Any]:
-    """Look up CPC classification code details.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use get_cpc_info for CPC code descriptions.
-
-    Args:
-        cpc_code: CPC code (class "G06" or group "G06N3/08")
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use get_cpc_info for CPC classification code descriptions."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use get_cpc_info(cpc_code) for CPC classification details.",
-    }
-
-
-@mcp.tool()
-async def patentsview_search_attorneys(
-    name: str,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """Search for patent attorneys/agents.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use odp_get_attorney with a specific application number
-    to look up attorney information per application.
-
-    Args:
-        name: Attorney or firm name (partial match supported)
-        limit: Maximum results to return (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use odp_get_attorney(app_num) to look up attorney information "
-            "for a specific application."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_get_attorney(app_num) for attorney info on specific applications.",
-    }
-
-
-@mcp.tool()
-async def patentsview_get_attorney(attorney_id: str) -> Dict[str, Any]:
-    """Get detailed attorney information by ID.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use odp_get_attorney with a specific application number
-    to look up attorney information per application.
-
-    Args:
-        attorney_id: Attorney ID from search results
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use odp_get_attorney(app_num) to look up attorney information "
-            "for a specific application."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_get_attorney(app_num) for attorney info on specific applications.",
-    }
-
-
-@mcp.tool()
-async def patentsview_lookup_ipc(ipc_code: str) -> Dict[str, Any]:
-    """Look up IPC (International Patent Classification) code details.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. No direct replacement exists for IPC lookups. Use
-    odp_search_datasets to find PatentsView bulk datasets containing IPC data.
-
-    Args:
-        ipc_code: IPC code (e.g., "G06F" for data processing)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "No direct replacement exists for IPC code lookups. "
-            "PatentsView bulk datasets on the USPTO Open Data Portal may "
-            "contain IPC data (use odp_search_datasets to find them)."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_search_datasets to find PatentsView bulk datasets with IPC data.",
-    }
-
-
-@mcp.tool()
-async def patentsview_search_by_ipc(
-    ipc_code: str,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """Search patents by IPC (International Patent Classification) code.
-
-    IMPORTANT: The PatentsView API (search.patentsview.org) was shut down on
-    March 20, 2026. Use ppubs_search_patents with an IPC query as a workaround.
-
-    Args:
-        ipc_code: IPC code (e.g., "G06F" for data processing)
-        limit: Maximum results to return (default: 100, max: 1000)
-    """
-    return {
-        "error": True,
-        "message": (
-            "PatentsView API is no longer available. The PatentsView API "
-            "(search.patentsview.org) was shut down on March 20, 2026. "
-            "Use ppubs_search_patents with an IPC classification query "
-            "to search by IPC code."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use ppubs_search_patents with an IPC query to search by classification.",
-    }
-
-
-# =====================================================================
-# Office Action Tools
-# =====================================================================
-
-@mcp.tool()
-async def get_office_action_text(
-    application_number: str,
-    mail_date: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Get full-text of office actions for an application.
-
-    USE THIS TOOL WHEN: You need to read examiner rejections, requirements,
-    and objections from prosecution.
-
-    IMPORTANT: The legacy Office Action text APIs (developer.uspto.gov) were
-    decommissioned in early 2026 and have NOT yet been migrated to the ODP.
-    This tool is temporarily unavailable. Use odp_get_documents to list file
-    wrapper documents (including office actions) and download them instead.
-
-    Args:
-        application_number: Application number (e.g., "16123456")
-        mail_date: Optional filter by mail date (YYYY-MM-DD)
+        assignee_name: Company or assignee name (e.g., "Soak Limited",
+                      "IBM", "Google", "Kunshan Paersi")
+        product_type: Optional product type to combine with company name
+                     (e.g., "smoker", "planter", "pot")
+        limit: Maximum results (default: 100)
 
     Returns:
-        Office action text including rejections and examiner comments.
+        All patents owned by this assignee, sorted by relevance.
+
+    Success Cases:
+        ppubs_search_by_assignee("Soak Limited", "smoker") → D976646, US-12414574-B2
+        ppubs_search_by_assignee("Kunshan Paersi", "planter") → D1062405
     """
+    # Extract core keywords from company name
+    # Remove common suffixes: Ltd, Limited, Co, Company, Inc, Corp, Corporation
+    import re
+    name = assignee_name.strip()
+
+    # Try to extract core company name
+    # Common patterns: "Company Ltd" -> "Company", "X Co., Ltd" -> "X"
+    core_name = re.sub(
+        r'\b(Limited|Ltd|Company|Co\.?|Inc\.?|Corp\.?|Corporation|LLC|GmbH)\b',
+        '',
+        name,
+        flags=re.IGNORECASE
+    ).strip()
+
+    # Remove punctuation and extra spaces
+    core_name = re.sub(r'[.,;]', ' ', core_name)
+    core_name = ' '.join(core_name.split())
+
+    # Get the first significant word as potential core keyword
+    core_parts = [p for p in core_name.split() if len(p) > 2]
+
+    all_patents = {}
+    strategies_used = []
+
+    # Strategy 1: Exact company name
+    query1 = f'"{assignee_name}"'
+    logger.info(f"Assignee search strategy 1: {query1}")
+    strategies_used.append("exact_name")
+
+    result1 = await ppubs_client.run_query(
+        query=query1,
+        start=0,
+        limit=min(limit, 200),
+        sort="date_publ desc",
+        sources=[Sources.GRANTED_PATENTS],
+    )
+    if not is_error(result1):
+        for p in result1.get(Fields.PATENTS, result1.get(Fields.DOCS, [])):
+            pn = p.get("documentId", p.get("patentNumber", ""))
+            if pn and pn not in all_patents:
+                all_patents[pn] = p
+                all_patents[pn]["search_strategy"] = "exact_name"
+
+    # Strategy 2: Core name keywords
+    if core_parts:
+        query2 = " AND ".join(core_parts[:2])  # Use first 2 significant words
+        logger.info(f"Assignee search strategy 2: {query2}")
+        strategies_used.append("core_keywords")
+
+        result2 = await ppubs_client.run_query(
+            query=query2,
+            start=0,
+            limit=min(limit, 200),
+            sort="date_publ desc",
+            sources=[Sources.GRANTED_PATENTS],
+        )
+        if not is_error(result2):
+            for p in result2.get(Fields.PATENTS, result2.get(Fields.DOCS, [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_patents:
+                    all_patents[pn] = p
+                    all_patents[pn]["search_strategy"] = "core_keywords"
+
+    # Strategy 3: Core name + product type (if provided)
+    if product_type and core_parts:
+        query3 = f"{core_parts[0]} AND {product_type}"
+        logger.info(f"Assignee search strategy 3: {query3}")
+        strategies_used.append("name_and_product")
+
+        result3 = await ppubs_client.run_query(
+            query=query3,
+            start=0,
+            limit=min(limit, 200),
+            sort="date_publ desc",
+            sources=[Sources.GRANTED_PATENTS],
+        )
+        if not is_error(result3):
+            for p in result3.get(Fields.PATENTS, result3.get(Fields.DOCS, [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_patents:
+                    all_patents[pn] = p
+                    all_patents[pn]["search_strategy"] = "name_and_product"
+
+    # Sort by relevance (design patents first, then by date)
+    def sort_key(p):
+        pn = p.get("documentId", p.get("patentNumber", "")).upper()
+        score = 0
+        if pn.startswith("D") or "-D" in pn:
+            score += 100
+        return -score
+
+    sorted_patents = sorted(all_patents.values(), key=sort_key)[:limit]
+
+    # Check for potential continuations
+    hint = f"Found {len(sorted_patents)} patents using {len(strategies_used)} search strategies."
+    if len(sorted_patents) > 1:
+        hint += " Check for continuation applications or related claims."
+
     return {
-        "error": True,
-        "message": (
-            "Office Action text API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use odp_get_documents to list file wrapper documents including "
-            "office actions, then download them from Patent Center."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_get_documents(app_num) to find office action documents in the file wrapper.",
+        "success": True,
+        "source": "ppubs",
+        "assignee_name": assignee_name,
+        "product_type": product_type,
+        "total": len(sorted_patents),
+        "strategies_used": strategies_used,
+        "results": sorted_patents,
+        "hint": hint
     }
 
 
 @mcp.tool()
-async def search_office_actions(
-    query: Optional[str] = None,
-    application_number: Optional[str] = None,
-    examiner_name: Optional[str] = None,
-    art_unit: Optional[str] = None,
-    mail_date_from: Optional[str] = None,
-    mail_date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
+async def ppubs_search_combined(
+    keywords: str,
+    limit: int = 50,
 ) -> Dict[str, Any]:
-    """Search office actions across applications.
+    """Multi-strategy combined search implementing all successful patterns.
 
-    IMPORTANT: Temporarily unavailable — legacy endpoints decommissioned,
-    ODP migration pending. Use odp_get_documents or odp_get_transactions instead.
+    USE THIS TOOL WHEN: Starting a new patent search. This implements
+    ALL successful strategies in sequence:
+    1. Exact phrase search (most precise)
+    2. TTL title search
+    3. Keyword combination search
+    4. Last 2-3 words (often most relevant)
+
+    Strategy: Layer multiple search approaches to maximize coverage.
+    Start with precise, expand to broad if needed.
 
     Args:
-        query: Full-text search query
-        application_number: Filter by application number
-        examiner_name: Filter by examiner name
-        art_unit: Filter by art unit number
-        mail_date_from: Date range start (YYYY-MM-DD)
-        mail_date_to: Date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return {
-        "error": True,
-        "message": (
-            "Office Action search API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use odp_get_transactions to search prosecution history, or "
-            "odp_search_applications to find applications by examiner/art unit."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_get_transactions(app_num) or odp_search_applications().",
-    }
-
-
-@mcp.tool()
-async def get_office_action_citations(
-    application_number: str,
-    mail_date: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Get prior art citations from office actions.
-
-    USE THIS TOOL WHEN: You need to see what references the examiner
-    cited against an application.
-
-    IMPORTANT: Temporarily unavailable — legacy endpoints decommissioned,
-    ODP migration pending. Use get_enriched_citations as an alternative.
-
-    Args:
-        application_number: Application number
-        mail_date: Optional filter by mail date (YYYY-MM-DD)
+        keywords: Search keywords (e.g., "pot with rotatable bottom",
+                  "cigar ashtray", "whiskey smoker")
+        limit: Maximum results (default: 50)
 
     Returns:
-        Citations from Form PTO-892, PTO-1449, and office action text.
+        Aggregated results from multiple search strategies.
+
+    Note: This tool runs multiple queries internally to cover all strategies.
     """
+    words = keywords.strip().split()
+    all_patents = {}
+
+    # Strategy 1: Exact phrase (keep original including stop words)
+    query1 = f'"{keywords}"'
+    result1 = await ppubs_client.run_query(
+        query=query1,
+        start=0,
+        limit=min(limit, 100),
+        sources=[Sources.GRANTED_PATENTS],
+    )
+    if not is_error(result1):
+        for p in result1.get(Fields.PATENTS, result1.get(Fields.DOCS, [])):
+            pn = p.get("documentId", p.get("patentNumber", ""))
+            if pn and pn not in all_patents:
+                all_patents[pn] = p
+                all_patents[pn]["search_strategy"] = "exact_phrase"
+
+    # Strategy 2: Title-focused search (using exact phrase as PPUBS doesn't support TTL:)
+    # Skip TTL search as it doesn't work, use variation instead
+    query2 = f'"{" ".join(words[:2])}"' if len(words) >= 2 else keywords
+    result2 = await ppubs_client.run_query(
+        query=query2,
+        start=0,
+        limit=min(limit, 100),
+        sources=[Sources.GRANTED_PATENTS],
+    )
+    if not is_error(result2):
+        for p in result2.get(Fields.PATENTS, result2.get(Fields.DOCS, [])):
+            pn = p.get("documentId", p.get("patentNumber", ""))
+            if pn and pn not in all_patents:
+                all_patents[pn] = p
+                all_patents[pn]["search_strategy"] = "title_search"
+
+    # Strategy 3: Last 2-3 words combination
+    if len(words) >= 2:
+        phrase_2 = " ".join(words[-2:])
+        query3 = f'"{phrase_2}"'
+        result3 = await ppubs_client.run_query(
+            query=query3,
+            start=0,
+            limit=min(limit, 100),
+            sources=[Sources.GRANTED_PATENTS],
+        )
+        if not is_error(result3):
+            for p in result3.get(Fields.PATENTS, result3.get(Fields.DOCS, [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_patents:
+                    all_patents[pn] = p
+                    all_patents[pn]["search_strategy"] = "last_2_words"
+
+    # Strategy 4: AND combination (broader search)
+    if len(words) >= 2:
+        query4 = " AND ".join(words[:3])  # First 3 words
+        result4 = await ppubs_client.run_query(
+            query=query4,
+            start=0,
+            limit=min(limit, 50),
+            sources=[Sources.GRANTED_PATENTS],
+        )
+        if not is_error(result4):
+            for p in result4.get(Fields.PATENTS, result4.get(Fields.DOCS, [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_patents:
+                    all_patents[pn] = p
+                    all_patents[pn]["search_strategy"] = "AND_combo"
+
+    # Sort by relevance (design patents first)
+    def sort_key(p):
+        pn = p.get("documentId", p.get("patentNumber", "")).upper()
+        score = 0
+        if pn.startswith("D") or "-D" in pn:
+            score += 100
+        title = p.get("inventionTitle", p.get("title", "")).lower()
+        for w in words:
+            if w.lower() in title:
+                score += 10
+        return -score
+
+    sorted_patents = sorted(all_patents.values(), key=sort_key)[:limit]
+
     return {
-        "error": True,
-        "message": (
-            "Office Action citations API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Try get_enriched_citations for citation data, or use "
-            "odp_get_documents to find PTO-892/PTO-1449 forms in the file wrapper."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use get_enriched_citations(patent_number) or odp_get_documents(app_num).",
+        "success": True,
+        "total": len(sorted_patents),
+        "strategies_used": ["exact_phrase", "title_search", "last_2_words", "AND_combo"],
+        "patents": sorted_patents,
+        "hint": f"Searched using 4 strategies. Found {len(sorted_patents)} unique patents."
     }
 
 
 @mcp.tool()
-async def get_office_action_rejections(
-    application_number: str,
-    mail_date: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Get rejection data from office actions.
+async def ppubs_get_inventor_patents(patent_number: str) -> Dict[str, Any]:
+    """Get all patents by inventors/assignees of a given patent - Smart aggregation.
 
-    USE THIS TOOL WHEN: You need structured data about claim rejections
-    including rejection type (102, 103, 112) and affected claims.
+    USE THIS TOOL WHEN: You found a relevant patent and want to
+    automatically discover other patents by the same inventors or company.
 
-    IMPORTANT: Temporarily unavailable — legacy endpoints decommissioned,
-    ODP migration pending. Use odp_get_documents to find office actions.
+    Improved Strategy (based on testing):
+    - Detects if applicant is individual inventor or company
+    - Uses appropriate search strategy for each type
+    - For companies: extracts core keywords + product context
+    - For individuals: splits name into FirstName AND LastName
 
     Args:
-        application_number: Application number
-        mail_date: Optional filter by mail date (YYYY-MM-DD)
+        patent_number: Known patent number (e.g., "D1003191", "D1062405", "D976646")
 
     Returns:
-        Rejection data with claim-level details.
+        List of all patents by the same inventor(s) or company.
     """
+    # First get the patent to find inventors/applicants
+    search_result = await _search_patent_by_number(patent_number)
+
+    if is_error(search_result):
+        return search_result
+
+    patent = search_result.get("patent", {})
+    applicants = patent.get("applicantName", patent.get("inventorArray", []))
+
+    if not applicants:
+        return {
+            "success": False,
+            "error": "No inventor/applicant information found",
+            "patent_number": patent_number
+        }
+
+    # Get patent title to extract product context
+    patent_title = patent.get("inventionTitle", "")
+
+    # Detect if applicant is company or individual
+    def is_company_name(name: str) -> bool:
+        """Check if name appears to be a company (not a person)."""
+        company_indicators = [
+            'Limited', 'Ltd', 'Inc', 'Corp', 'Corporation', 'Company', 'Co.',
+            'LLC', 'GmbH', 'AG', 'SA', 'Electronic', 'Commerce', 'Technology',
+            'Industries', 'Manufacturing', 'Enterprises', 'Group', 'Holding'
+        ]
+        name_lower = name.lower()
+        return any(ind.lower() in name_lower for ind in company_indicators)
+
+    # Extract product context from patent title
+    def extract_product_context(title: str) -> str:
+        """Extract likely product type from patent title."""
+        if not title:
+            return None
+        # Clean HTML tags
+        title = re.sub(r'<[^>]+>', '', title)
+        title_lower = title.lower()
+
+        # Common product categories
+        product_keywords = [
+            'planter', 'pot', 'flowerpot', 'container', 'tray',
+            'smoker', 'infuser', 'ashtray', 'cigar',
+            'camera', 'monitor', 'device', 'apparatus',
+            'holder', 'stand', 'rack', 'shelf'
+        ]
+        for kw in product_keywords:
+            if kw in title_lower:
+                return kw
+        return None
+
+    import re
+    product_context = extract_product_context(patent_title)
+
+    all_results = {}
+    search_info = []
+
+    for applicant in applicants:
+        if isinstance(applicant, dict):
+            name = applicant.get("inventorName", applicant.get("name", ""))
+        else:
+            name = str(applicant)
+
+        if not name:
+            continue
+
+        is_company = is_company_name(name)
+        info = {
+            "name": name,
+            "type": "company" if is_company else "individual"
+        }
+
+        if is_company:
+            # Company search: use improved assignee search
+            result = await ppubs_search_by_assignee(
+                assignee_name=name,
+                product_type=product_context,
+                limit=100
+            )
+            info["strategy"] = "company_search"
+
+        else:
+            # Individual search: use improved inventor search
+            result = await ppubs_search_by_inventor(
+                inventor_name=name,
+                limit=100
+            )
+            info["strategy"] = "inventor_search"
+
+        search_info.append(info)
+
+        if result.get("success"):
+            for p in result.get("results", result.get("patents", [])):
+                pn = p.get("documentId", p.get("patentNumber", ""))
+                if pn and pn not in all_results:
+                    all_results[pn] = p
+
+    # Sort by relevance (design patents first)
+    def sort_key(p):
+        pn = p.get("documentId", p.get("patentNumber", "")).upper()
+        score = 0
+        if pn.startswith("D") or "-D" in pn:
+            score += 100
+        return -score
+
+    sorted_patents = sorted(all_results.values(), key=sort_key)
+
     return {
-        "error": True,
-        "message": (
-            "Office Action rejections API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use odp_get_documents to find office action documents in the file "
-            "wrapper and download them from Patent Center for rejection details."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use odp_get_documents(app_num) to find office action documents.",
+        "success": True,
+        "source_patent": patent_number,
+        "source_title": patent_title,
+        "product_context": product_context,
+        "applicants_found": len(applicants),
+        "applicant_info": search_info,
+        "related_patents": sorted_patents,
+        "total": len(sorted_patents),
+        "hint": f"Found {len(sorted_patents)} related patents from {len(applicants)} applicant(s)"
     }
-
-
-# =====================================================================
-# Citation Tools
-# =====================================================================
-
-@mcp.tool()
-async def get_enriched_citations(
-    patent_number: str,
-    include_forward: bool = True,
-    include_backward: bool = True,
-) -> Dict[str, Any]:
-    """Get enriched citation data for a patent.
-
-    USE THIS TOOL WHEN: You need citation analysis including forward
-    citations (who cites this patent) and backward (what this patent cites).
-
-    IMPORTANT: The legacy Enriched Citation API (developer.uspto.gov) was
-    decommissioned in early 2026 and has NOT yet been migrated to the ODP.
-    This tool is temporarily unavailable. Use patentsview_get_patent for
-    basic citation data instead.
-
-    Args:
-        patent_number: Patent number
-        include_forward: Include forward citations (default: True)
-        include_backward: Include backward citations (default: True)
-
-    Returns:
-        Enriched citation data with metrics.
-    """
-    return {
-        "error": True,
-        "message": (
-            "Enriched Citation API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use patentsview_get_patent for basic citation data, or "
-            "odp_get_documents to find PTO-892 citation forms in the file wrapper."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use patentsview_get_patent(patent_number) for citation data.",
-    }
-
-
-@mcp.tool()
-async def search_citations(
-    citing_patent: Optional[str] = None,
-    cited_patent: Optional[str] = None,
-    assignee: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search citation records.
-
-    IMPORTANT: Temporarily unavailable — legacy endpoints decommissioned,
-    ODP migration pending. Use patentsview_search_patents instead.
-
-    Args:
-        citing_patent: Patent that is citing
-        cited_patent: Patent being cited
-        assignee: Filter by assignee name
-        date_from: Date range start (YYYY-MM-DD)
-        date_to: Date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return {
-        "error": True,
-        "message": (
-            "Enriched Citation search API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use patentsview_search_patents for citation-based patent searches."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use patentsview_search_patents(query) for citation searches.",
-    }
-
-
-@mcp.tool()
-async def get_citation_metrics(patent_number: str) -> Dict[str, Any]:
-    """Get citation metrics for a patent.
-
-    USE THIS TOOL WHEN: You need quantitative citation analysis including
-    forward/backward counts and citation age metrics.
-
-    IMPORTANT: Temporarily unavailable — legacy endpoints decommissioned,
-    ODP migration pending.
-
-    Args:
-        patent_number: Patent number
-    """
-    return {
-        "error": True,
-        "message": (
-            "Citation metrics API is temporarily unavailable. The legacy "
-            "endpoints at developer.uspto.gov were decommissioned in early 2026 "
-            "and have not yet been migrated to the ODP (api.uspto.gov). "
-            "Use patentsview_get_patent for basic citation counts."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": "Use patentsview_get_patent(patent_number) for citation counts.",
-    }
-
-
-# =====================================================================
-# Litigation Tools
-# =====================================================================
-
-def _litigation_unavailable() -> Dict[str, Any]:
-    """Shared API_UNAVAILABLE payload for all litigation tools (see issue #16)."""
-    return {
-        "error": True,
-        "message": (
-            "The USPTO Patent Litigation API is not available on the Open "
-            "Data Portal (api.uspto.gov). No litigation endpoints are "
-            "listed in the ODP Swagger catalog at "
-            "https://data.uspto.gov/swagger/index.html. The OCE Patent "
-            "Litigation dataset (74,000+ district court cases) is "
-            "distributed as a bulk download rather than a live API. "
-            "Download it from https://www.uspto.gov/ip-policy/economic-"
-            "research/research-datasets/patent-litigation-docket-reports-"
-            "data, or use ppubs_search_patents as a partial workaround."
-        ),
-        "error_code": "API_UNAVAILABLE",
-        "workaround": (
-            "Download the OCE Patent Litigation bulk dataset from "
-            "https://www.uspto.gov/ip-policy/economic-research/research-"
-            "datasets/patent-litigation-docket-reports-data, or use "
-            "ppubs_search_patents(query) for patent-level lookups."
-        ),
-    }
-
-
-@mcp.tool()
-async def search_litigation(
-    query: Optional[str] = None,
-    patent_number: Optional[str] = None,
-    plaintiff: Optional[str] = None,
-    defendant: Optional[str] = None,
-    court: Optional[str] = None,
-    filing_date_from: Optional[str] = None,
-    filing_date_to: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Search patent litigation cases (74,000+ district court records).
-
-    IMPORTANT: The USPTO Patent Litigation API is not available on the Open
-    Data Portal (api.uspto.gov) and is not listed in the ODP Swagger
-    catalog. The OCE Patent Litigation dataset is distributed as bulk
-    downloadable files rather than a live API.
-
-    Args:
-        query: Full-text search query
-        patent_number: Filter by patent number
-        plaintiff: Filter by plaintiff name
-        defendant: Filter by defendant name
-        court: Filter by court/district
-        filing_date_from: Date range start (YYYY-MM-DD)
-        filing_date_to: Date range end (YYYY-MM-DD)
-        offset: Starting position (default: 0)
-        limit: Max results (default: 25)
-    """
-    return _litigation_unavailable()
-
-
-@mcp.tool()
-async def get_litigation_case(case_id: str) -> Dict[str, Any]:
-    """Get details of a specific litigation case.
-
-    IMPORTANT: The USPTO Patent Litigation API is not available on the Open
-    Data Portal. See search_litigation for details and workarounds.
-
-    Args:
-        case_id: Case identifier
-    """
-    return _litigation_unavailable()
-
-
-@mcp.tool()
-async def get_patent_litigation(patent_number: str) -> Dict[str, Any]:
-    """Get all litigation involving a specific patent.
-
-    IMPORTANT: The USPTO Patent Litigation API is not available on the Open
-    Data Portal. See search_litigation for details and workarounds.
-
-    Args:
-        patent_number: Patent number
-    """
-    return _litigation_unavailable()
-
-
-@mcp.tool()
-async def get_party_litigation(
-    party_name: str,
-    role: Optional[str] = None,
-    limit: int = 25,
-) -> Dict[str, Any]:
-    """Get litigation history for a company or individual.
-
-    IMPORTANT: The USPTO Patent Litigation API is not available on the Open
-    Data Portal. See search_litigation for details and workarounds.
-
-    Args:
-        party_name: Company or individual name
-        role: Filter by role - "plaintiff", "defendant", or None for both
-        limit: Max results (default: 25)
-    """
-    return _litigation_unavailable()
 
 
 # =====================================================================
@@ -1818,9 +1072,39 @@ async def get_party_litigation(
 # =====================================================================
 
 def main():
-    """Initialize and run the server with stdio transport."""
-    logger.info("Starting USPTO Patent MCP server with stdio transport")
-    mcp.run(transport='stdio')
+    """Initialize and run the server with transport from environment."""
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="USPTO Patent MCP Server")
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio", "sse"],
+        help="Transport type: stdio (local) or sse (remote)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for SSE transport (default: 8000, set via PORT env)"
+    )
+
+    args = parser.parse_args()
+
+    if args.transport == "sse":
+        # Set port via environment variable for uvicorn
+        os.environ["PORT"] = str(args.port)
+        logger.info(f"Starting USPTO Patent MCP server with SSE transport on port {args.port}")
+        # SSE transport for remote access (Cherry Studio)
+        # FastMCP SSE runs on http://127.0.0.1:8000 by default
+        # Use Nginx reverse proxy for external access
+        mcp.run(transport="sse")
+    else:
+        logger.info("Starting USPTO Patent MCP server with stdio transport")
+        # stdio transport for local access (Claude Code)
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

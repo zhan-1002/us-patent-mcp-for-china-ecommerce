@@ -419,42 +419,46 @@ Build keywords from:
 
 Remove: dimensions, colors, quantities, marketing words, brand names
 
-## Step 3: Patent Search
+## Step 3: Multi-Strategy Search
 
-Use `ppubs_search_patents` for searching:
+Use `ppubs_search_combined` for comprehensive coverage:
 ```
-ppubs_search_patents(query="keywords from product", search_type="any")
-```
-
-Search strategies:
-- Try exact phrase first: `"self watering pot"`
-- Use AND combination: `"pot" AND "water indicator"`
-- Search design patents separately (D-series)
-
-## Step 4: Get Patent Details
-
-When you find a relevant patent, get full details:
-```
-ppubs_get_patent_by_number("patent_number")
+ppubs_search_combined("keywords from product")
 ```
 
-This shows inventors and assignee for further research.
+This runs 4 strategies automatically:
+- Exact phrase search
+- Title search
+- Last 2-3 words search
+- AND combination search
 
-## Step 5: Related Patents Search
+## Step 4: Inventor Tracking (Important!)
 
-Search for patents from the same company:
+When you find a relevant patent, check the inventor's other patents:
 ```
-ppubs_search_patents(query="AN/company_name")
+ppubs_get_inventor_patents("patent_number")
 ```
 
-Use assignee name from previous results to find related patents.
+This discovers hidden related patents by the same inventor.
+Often reveals patents with different names but similar structures.
 
-## Step 6: Design Patent Search
+## Step 5: Assignee Tracking
 
-For design patents, include "D" prefix:
+Track company patent families:
 ```
-ppubs_search_patents(query="product keywords", search_type="any")
+ppubs_search_by_assignee("company name")
 ```
+
+Finds continuation applications and related patents from the same company.
+
+## Step 6: Precise Title Search
+
+For design patents, use title search:
+```
+ppubs_search_by_ttl("product keywords")
+```
+
+Most effective for products with clear, specific names.
 
 ## Step 7: Result Analysis
 
@@ -470,18 +474,18 @@ For each patent found:
 | Factor | Implementation |
 |--------|---------------|
 | Keep original phrasing | Don't remove "stop words" like "with", "and" |
-| Multiple searches | Try different keyword combinations |
+| Inventor tracking | Always check inventor's other patents |
+| Multiple strategies | Use combined search, not single query |
 | Ask about hidden features | User input reveals unlisted structures |
-| Check assignee | Search company name to find related patents |
 
 ## Common Mistakes to Avoid
 
 | Mistake | Problem | Solution |
 |---------|---------|----------|
 | Filter stop words | USPTO needs exact phrase | Keep original phrasing |
-| Single search | Misses related patents | Try multiple keyword combinations |
+| Single search | Misses related patents | Use combined + inventor tracking |
 | Only listing keywords | Misses hidden features | Ask user about structure |
-| Ignore assignee info | Misses related patents | Search company name for family |
+| Ignore inventor info | Misses related patents | Track inventor's portfolio |
 """
 
 PATENT_LANDSCAPE_PROMPT = """
