@@ -4,6 +4,25 @@
 >
 > A dual-engine USPTO Patent MCP Server optimized for China e-commerce product patent search.
 
+## Codex 优化（v1.1.0）
+
+本版本针对 Codex 的工具调用和聊天阅读体验进行了专项优化：
+
+- 使用 `patent_search_aggregated` 自动执行多关键词、双来源和多页检索，不再把单页 `limit` 当成完整结果。
+- 使用 `patent_evaluate_recall` 将新结果与旧工具历史样本对比；历史候选未召回时明确列出，不允许静默退化。
+- 聚合结果同时返回完整结构化数据和 `codex_markdown`。Codex 应优先展示“检索情况、重点专利对比、历史样本召回”三部分。
+- 重点候选使用可点击的 Google Patents 链接；聊天正文默认只展示前 12 条，避免大段 JSON 挤占上下文。
+- 完整结果仍保留在 `results`，用户要求时再展开，不因聊天折叠而降低实际检索数量。
+
+推荐在 Codex 中直接提出：
+
+```text
+使用 patent_search_aggregated 搜索 religious cross，
+同时运行 religious_cross 历史召回基线，并按 codex_markdown 展示结果。
+```
+
+可用召回基线见资源 `patents://recall-baselines`。
+
 基于 [riemannzeta/patent_mcp_server](https://github.com/riemannzeta/patent_mcp_server) 修改的增强版本。
 
 ## 与原版的区别
@@ -11,7 +30,7 @@
 | 特性 | 原版 | 本版本 |
 |------|------|--------|
 | API Key | ODP 工具需要 | **无需任何 API Key** |
-| 工具数量 | 52 个 | 20 个（双引擎核心功能） |
+| 工具数量 | 52 个 | 24 个（专利、商标、聚合与召回评估） |
 | 搜索引擎 | PPUBS 单一引擎 | PPUBS + Google Patents 双引擎 |
 | 设计专利 | TF-IDF（效果差） | Google ML 排序 + 引用网络 |
 | 引用分析 | 无 | 双向引用网络 + urpn 提取 |
@@ -54,6 +73,17 @@ uv sync
 # 验证安装
 uv run patent-mcp-server
 ```
+
+### Codex 配置（推荐）
+
+仓库已包含 `.mcp.json`。从仓库目录启动 Codex 后，使用本地 `patents` MCP 即可。不要把 API key 写入仓库配置；需要令牌时使用环境变量。
+
+Codex 聊天展示约定：
+
+1. 先显示 `codex_markdown` 中的检索情况。
+2. 用可点击表格展示重点专利，不在正文倾倒完整 JSON。
+3. 明确显示历史召回率和遗漏号码。
+4. 只有用户要求时才展开完整 `results`。
 
 ### Claude Code 配置
 
@@ -122,6 +152,8 @@ claude mcp add-json patents '{"command": "uv", "args": ["--directory", "/path/to
 | `ppubs_search_by_inventor` | 发明人搜索 | 按发明人名称搜索 |
 | `ppubs_search_by_assignee` | 申请人搜索 | 按公司名称搜索 |
 | `ppubs_get_inventor_patents` | 自动发明人追踪 | 一键查找同发明人专利 |
+| `patent_search_aggregated` | 双来源分页聚合搜索 | 多查询、多页、去重、请求预算与历史召回检查 |
+| `patent_evaluate_recall` | 历史样本召回评估 | 防止新版本遗漏旧工具已找到的重点专利 |
 
 ### Google Patents 工具（双引擎）
 

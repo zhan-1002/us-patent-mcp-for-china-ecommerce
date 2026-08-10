@@ -36,7 +36,7 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # HTTP Settings
-    USER_AGENT: str = os.getenv("USER_AGENT", "patent-mcp-server/0.9.1")
+    USER_AGENT: str = os.getenv("USER_AGENT", "patent-mcp-server/1.1.0")
     REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
 
     # Rate Limiting & Retry
@@ -55,6 +55,10 @@ class Config:
     GP_BASE_URL: str = os.getenv("GP_BASE_URL", "https://patents.google.com")
     GP_REQUEST_DELAY: float = float(os.getenv("GP_REQUEST_DELAY", "2.0"))
     GP_REQUEST_TIMEOUT: float = float(os.getenv("GP_REQUEST_TIMEOUT", "30.0"))
+
+    # USPTO Trademark Search internal API (no key required; optional WAF cookie)
+    TMSEARCH_BASE_URL: str = os.getenv("TMSEARCH_BASE_URL", "https://tmsearch.uspto.gov")
+    TMSEARCH_WAF_TOKEN: Optional[str] = os.getenv("TMSEARCH_WAF_TOKEN")
 
     # Response Size Management (for LLM context windows)
     MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "8000"))

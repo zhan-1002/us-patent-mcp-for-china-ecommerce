@@ -249,6 +249,7 @@ class GooglePatentsClient:
         offset: int = 0,
         country: str = "US",
         language: str = "ENGLISH",
+        retry_on_503: bool = True,
     ) -> Dict[str, Any]:
         """Search patents on Google Patents.
 
@@ -290,6 +291,15 @@ class GooglePatentsClient:
 
             async with self._throttle():
                 response = await self.client.get(url, headers=self._xhr_headers())
+
+            if response.status_code == 503 and not retry_on_503:
+                return ApiError.create(
+                    message=(
+                        "Google Patents is rate-limiting this IP. "
+                        "Aggregated search continued with other sources; retry Google later."
+                    ),
+                    status_code=503,
+                )
 
             if response.status_code == 503:
                 logger.warning("503 — likely rate-limited; waiting 90s and retrying once")
@@ -501,7 +511,7 @@ class GooglePatentsClient:
         """Convert raw Google Patents JSON to a standardised result dict."""
         results_data = raw.get("results", {})
         total = results_data.get("total_num_results", 0)
-        patents = self._flatten_results(raw)
+        patents = self._flatten_results(raw)[:limit]
 
         normalized = []
         for p in patents:
