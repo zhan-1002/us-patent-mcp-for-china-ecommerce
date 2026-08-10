@@ -135,3 +135,27 @@ class OfficeActionTypes:
     ALLOWANCE = "Notice of Allowance"
     RESTRICTION = "Restriction Requirement"
     ADVISORY = "Advisory Action"
+
+
+class Google:
+    """Google Patents API constants."""
+    BASE_URL = "https://patents.google.com"
+    IMAGES_BASE_URL = "https://patentimages.storage.googleapis.com"
+
+
+class GPDefaults:
+    """Default values for Google Patents operations."""
+    REQUEST_DELAY = 2.0
+    REQUEST_TIMEOUT = 30.0
+    DESIGN_FACET = "DESIGN"
+    PATENT_FACET = "PATENT"
+    DEFAULT_LIMIT = 20
+    MAX_LIMIT = 100
+    THROTTLE_RETRY_DELAY = 90  # seconds to wait after 503
+
+
+class GPTypeFilters:
+    """Google Patents type filter values."""
+    DESIGN = "DESIGN"
+    PATENT = "PATENT"
+    ANY = "ANY"  # no type filter applied

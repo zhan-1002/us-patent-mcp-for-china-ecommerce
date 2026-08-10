@@ -1,15 +1,26 @@
 """
-MCP Prompts for USPTO Patent Server.
+MCP Prompts for USPTO Patent Server (PPUBS + Google Patents).
 
 Prompts provide reusable workflow templates for common patent research tasks.
 Users can access these via / commands.
+
+All prompts reference only the 20 tools registered in this server:
+  PPUBS: ppubs_search_patents, ppubs_search_applications, ppubs_get_full_document,
+         ppubs_get_patent_by_number, ppubs_download_patent_pdf, ppubs_search_by_ttl,
+         ppubs_search_by_inventor, ppubs_search_by_assignee, ppubs_search_combined,
+         ppubs_get_inventor_patents, ppubs_get_citations, ppubs_get_cited_by,
+         ppubs_get_citation_network
+  Google: gp_search_patents, gp_get_patent_detail, gp_get_similar_patents,
+          gp_get_citations
+  Utility: check_api_status, get_cpc_info, get_status_code
 """
 
 PRIOR_ART_SEARCH_PROMPT = """
 # Prior Art Search Workflow
 
 A comprehensive prior art search helps identify existing patents and publications
-relevant to an invention. Follow this structured approach:
+relevant to an invention. Follow this structured approach using the dual-engine
+(PPUBS + Google Patents) tools.
 
 ## Step 1: Define the Invention
 - Identify the key technical features
@@ -19,479 +30,181 @@ relevant to an invention. Follow this structured approach:
 ## Step 2: Keyword Search (Broad)
 Start with broad text searches to understand the landscape:
 
-```
-Use patentsview_search_patents or ppubs_search_patents:
-- Search key terms from the invention description
+Use `gp_search_patents` and `ppubs_search_combined`:
+- `gp_search_patents` for design patents and ML-ranked results — best for products with visual features
+- `ppubs_search_combined` for multi-strategy PPUBS search
 - Try synonyms and alternative phrasings
-- Use search_type="any" for broad results first
-```
+- Use `type="PATENT"` for utility patents, `type="DESIGN"` for design patents
 
 ## Step 3: Identify Relevant CPC Codes
 From initial results, identify CPC classification codes:
 
-```
-Use patentsview_lookup_cpc to understand classifications:
-- Note CPC codes from relevant patents found
+Use `get_cpc_info` on CPC codes found in search results:
+- Note CPC codes from relevant patents
 - Look up parent/child codes for broader/narrower scope
-```
 
-## Step 4: CPC-Based Search (Focused)
+## Step 4: Classification-Based Search
 Search within relevant CPC classifications:
 
 ```
-Use patentsview_search_by_cpc:
+gp_search_patents('cpc:"G06N3/08"', type="PATENT")
+```
 - Focus on identified CPC codes
 - Combine with keywords if needed
-```
 
 ## Step 5: Inventor/Assignee Search
 Find patents from key players in the field:
 
 ```
-Use patentsview_search_inventors and patentsview_search_assignees:
+ppubs_search_by_inventor("inventor name")
+ppubs_search_by_assignee("company name")
+ppubs_get_inventor_patents("known patent number")
+```
 - Search for prolific inventors in the field
 - Find competitors' patent portfolios
-```
+- Track inventor networks automatically
 
 ## Step 6: Citation Analysis
-Review what prior art examiners have cited:
+Trace the citation graph for comprehensive coverage:
+
+Use `ppubs_get_citation_network` on key patents:
+- backward: older prior art the patent cites
+- forward: newer patents that cite this one
+- Both design and utility patents surfaced
+
+## Step 7: Deep Dive
+Get complete patent text when a lead looks promising:
 
 ```
-Use get_office_action_citations:
-- Check citations from related applications
-- Follow citation chains backward and forward
+ppubs_get_full_document(guid, source_type)  → full claims + description
+ppubs_get_patent_by_number("DXXXXXX")       → granted patent text
 ```
-
-## Step 7: International Coverage
-Expand to international patents:
-
-```
-Use ppubs_search_patents for PCT applications published in US:
-- Search for WO (PCT) applications
-- Note: USPTO tools focus on US patents and applications
-```
-
-## Tips:
-- Document all searches performed for completeness
-- Save relevant patent numbers for detailed review
-- Check patent family relationships with get_app_continuity
-- Review full claims using patentsview_get_claims
 """
 
 PATENT_VALIDITY_ANALYSIS_PROMPT = """
 # Patent Validity Analysis Workflow
 
-Analyze the validity and prosecution history of a patent to assess its strength.
+Analyze the validity and strength of a patent using PPUBS full documents
+and citation networks.
 
 ## Step 1: Get Patent Details
 ```
-Use ppubs_get_patent_by_number or patentsview_get_patent:
+ppubs_get_patent_by_number("patent_number")
+```
 - Review claims (especially independent claims)
 - Note the filing and priority dates
 - Identify the assignee and inventors
-```
 
-## Step 2: Review Claims
+## Step 2: Review Full Claims Text
 ```
-Use patentsview_get_claims:
+ppubs_get_full_document(guid, "USPAT")
+```
 - Identify independent vs dependent claims
 - Note claim scope and key limitations
 - Look for potential narrow vs broad interpretations
-```
 
-## Step 3: Examine Prosecution History
+## Step 3: Citation Network Analysis
 ```
-Use get_app (with application number) to get file wrapper data:
-- Review office action history
-- Check amendments made during prosecution
-- Note any disclaimer or terminal disclaimers
+ppubs_get_citation_network("patent_number")
 ```
+- backward: prior art the patent cites (potential invalidity sources)
+- forward: newer patents citing this one (indicator of relevance)
+- Check for conflicting prior art
 
-## Step 4: Review Office Actions
+## Step 4: Examiner Citations
 ```
-Use get_office_action_text and get_office_action_rejections:
-- See what prior art examiner cited
-- Understand rejection bases (102, 103, 112)
-- Review applicant's arguments and claim amendments
+ppubs_get_citations("patent_number")
 ```
+- Extract urpn references from the full PPUBS document
+- Review what prior art the examiner considered
+- Note design vs utility breakdown
 
-## Step 5: Check PTAB Proceedings
+## Step 5: Similar Patent Discovery
 ```
-Use ptab_search_proceedings with the patent number:
-- Check for IPR, PGR, or CBM challenges
-- Review institution decisions
-- Examine final written decisions if available
+gp_get_similar_patents("patent_number")
 ```
+- ML-based similar patent discovery via Google Patents
+- Finds patents in the same CPC class or with similar titles
+- Useful for identifying hidden prior art
 
-## Step 6: Review Litigation History
+## Step 6: Google Patents Citation Graph
 ```
-Use get_patent_litigation_history:
-- Check for past infringement suits
-- Review outcomes and claim construction rulings
-- Note any settlements or licensing
+gp_get_citations("patent_number", direction="both")
 ```
-
-## Step 7: Citation Analysis
-```
-Use get_enriched_citations:
-- Review forward citations (indicator of importance)
-- Check backward citations for prior art
-- Analyze citation metrics
-```
-
-## Step 8: Family Analysis
-```
-Use get_app_continuity:
-- Identify parent/child applications
-- Check for continuation claim variations
-- Note any related patents with different claim scope
-```
+- Cross-reference with PPUBS citation data
+- Google's ML-ranked citation network
 
 ## Assessment Factors:
-- Prosecution history estoppel from amendments
-- Strength of prior art cited by examiner
-- Survival of PTAB challenges
-- Claim construction history in litigation
+- Strength of prior art cited by examiner and found via citation network
+- Scope limitations from claim language
+- Forward citation count (indicator of importance)
+- Similar patents in the same CPC family
 """
 
 COMPETITOR_PORTFOLIO_ANALYSIS_PROMPT = """
 # Competitor Patent Portfolio Analysis Workflow
 
-Analyze a company's patent portfolio to understand their IP position and strategy.
+Analyze a company's patent portfolio using PPUBS assignee search and
+citation networks.
 
-## Step 1: Identify Company Variations
-Companies often file under different names:
+## Step 1: Identify Company Patents
 ```
-Use patentsview_search_assignees:
+ppubs_search_by_assignee("company name", product_type="optional product type")
+```
 - Search for company name and variations
+- Add product type context for better results
 - Note subsidiary names
-- Record disambiguated assignee IDs
-```
 
 ## Step 2: Get Portfolio Overview
 ```
-Use patentsview_search with assignee filter:
+ppubs_search_patents('"company name".as.')
+```
 - Get count of total patents
 - Identify date range of filings
 - Note technology distribution by CPC
-```
 
 ## Step 3: Technology Focus Analysis
-```
-Use patentsview_search_by_cpc:
+Use `get_cpc_info` on CPC codes from company patents:
 - Identify top CPC codes in portfolio
 - Map technology areas covered
 - Find gaps or emerging focus areas
-```
 
 ## Step 4: Inventor Analysis
 ```
-Use patentsview_search_inventors:
+ppubs_search_by_inventor("inventor name")
+ppubs_get_inventor_patents("representative patent number")
+```
 - Identify key inventors
-- Track inventor movement (acquired talent)
+- Track inventor portfolios
 - Find prolific inventors by patent count
-```
 
-## Step 5: Filing Trends
+## Step 5: Citation Network Mapping
 ```
-Search with date filters:
+ppubs_get_citation_network("key patent number")
+```
+- Identify most-cited patents (crown jewels)
+- Find citation relationships with competitors
+- Map technology influence through forward citations
+
+## Step 6: Google Patents Cross-Reference
+```
+gp_search_patents('assignee:"Company Name"', type="ANY")
+gp_get_patent_detail("patent number")
+```
+- ML-ranked view of company's portfolio
+- Design patent discovery (often missed by PPUBS)
+
+## Step 7: Filing Trends
+Search with date filters and track:
 - Analyze year-over-year filing trends
 - Identify ramp-up or slow-down periods
 - Correlate with business events if known
-```
-
-## Step 6: Citation Analysis
-```
-Use get_enriched_citations on key patents:
-- Identify most-cited patents (crown jewels)
-- Find citation relationships with competitors
-- Analyze technology influence
-```
-
-## Step 7: Litigation Profile
-```
-Use get_party_litigation_history:
-- Review assertion history (offensive use)
-- Check defense cases (being sued)
-- Identify frequent opponents
-```
-
-## Step 8: PTAB Exposure
-```
-Use ptab_search_proceedings with party name:
-- Count IPR/PGR challenges received
-- Review survival rate
-- Identify vulnerable technology areas
-```
-
-## Deliverables:
-- Total patent count and active patents
-- Top technology areas (by CPC)
-- Key patents (high citations, litigated)
-- Filing trend analysis
-- Risk areas (PTAB challenges, invalidations)
-"""
-
-PTAB_PROCEEDING_RESEARCH_PROMPT = """
-# PTAB Proceeding Research Workflow
-
-Research Patent Trial and Appeal Board proceedings for a patent or party.
-
-## Understanding PTAB Proceeding Types
-
-- **IPR (Inter Partes Review)**: Challenge based on patents/publications (35 USC 102/103)
-- **PGR (Post-Grant Review)**: Broader challenge within 9 months of grant
-- **CBM (Covered Business Method)**: For financial service method patents (sunsetted)
-- **Derivation**: Priority disputes between applications
-
-## Step 1: Search by Patent Number
-```
-Use ptab_search_proceedings with patent_number:
-- Find all proceedings involving the patent
-- Note proceeding numbers (e.g., IPR2023-00001)
-- Check status (Pending, Instituted, Terminated, FWD Entered)
-```
-
-## Step 2: Get Proceeding Details
-```
-Use ptab_get_proceeding:
-- Review petitioner and patent owner
-- Check filing date and current status
-- Note challenged claims
-```
-
-## Step 3: Review Documents
-```
-Use ptab_get_proceeding_documents:
-- Get petition and patent owner response
-- Review expert declarations
-- Find settlement documents if terminated
-```
-
-## Step 4: Search Related Decisions
-```
-Use ptab_search_decisions:
-- Find institution decision
-- Get final written decision (FWD)
-- Review any terminations or settlements
-```
-
-## Step 5: Analyze Decision
-```
-Use ptab_get_decision:
-- Review claim-by-claim determinations
-- Note key prior art relied upon
-- Understand Board's reasoning
-```
-
-## Step 6: Check Appeals
-```
-Use ptab_search_appeals:
-- Find ex parte appeal decisions
-- Review CAFC appeals of PTAB decisions
-```
-
-## Step 7: Party History
-```
-Use ptab_search_proceedings with party_name:
-- Find other proceedings involving same parties
-- Identify serial petitioners
-- Review party success rates
-```
-
-## Key Metrics to Track:
-- Institution rate (% of petitions instituted)
-- Claim survival rate (% claims surviving FWD)
-- Settlement rate
-- Average proceeding duration
-- Serial petition patterns
-"""
-
-FREEDOM_TO_OPERATE_PROMPT = """
-# Freedom to Operate (FTO) Analysis Workflow
-
-Assess the risk of patent infringement for a product or technology.
-
-## Step 1: Define the Product/Technology
-- List all technical features and components
-- Identify the country/countries of operation
-- Note planned manufacturing, sale, and use locations
-
-## Step 2: Keyword and Classification Search
-```
-Use patentsview_search and patentsview_search_by_cpc:
-- Search for each technical feature
-- Use multiple synonyms and phrasings
-- Focus on relevant CPC classifications
-```
-
-## Step 3: Identify Potentially Relevant Patents
-For each patent found, evaluate:
-- Is it still in force? (check expiration)
-- Does it cover the geography of interest?
-- Are the claims potentially reading on your product?
-
-## Step 4: Detailed Claim Analysis
-```
-Use patentsview_get_claims and ppubs_get_patent_by_number:
-- Read independent claims carefully
-- Compare each claim element to your product
-- Document any differences (design-arounds)
-```
-
-## Step 5: Check Patent Status
-```
-Use get_app_metadata and get_app_transactions:
-- Verify patent is not expired
-- Check for maintenance fee status
-- Note any terminal disclaimers
-```
-
-## Step 6: Review Prosecution History
-```
-Use get_office_action_text and get_office_action_rejections:
-- Understand scope limitations from prosecution
-- Note any estoppel from claim amendments
-- Review applicant's arguments for claim interpretation
-```
-
-## Step 7: Check Validity Challenges
-```
-Use ptab_search_proceedings:
-- See if patents have been challenged
-- Review any claim invalidations
-- Note surviving claims
-```
-
-## Step 8: Assess Litigation History
-```
-Use get_patent_litigation_history:
-- Check if patent has been asserted
-- Review claim construction rulings
-- Note any licenses or settlements
-```
-
-## Risk Assessment Categories:
-- **High Risk**: Claims appear to cover product, patent is valid and enforced
-- **Medium Risk**: Claims may cover, some validity questions, or design-around possible
-- **Low Risk**: Clear non-infringement or strong invalidity arguments
-- **Clear**: No relevant patents found or all expired
-
-## Recommended Actions by Risk Level:
-- High: Consider license, design-around, or validity challenge
-- Medium: Monitor, prepare non-infringement/invalidity positions
-- Low: Document analysis, monitor for new patents
-"""
-
-PRODUCT_PATENT_SEARCH_PROMPT = """
-# Product Patent Search Workflow (Optimized)
-
-Based on successful search experiences from real cases, this workflow implements
-proven strategies for finding product-related patents.
-
-## Search Strategy Patterns
-
-| Product Type | Search Strategy | Example Query |
-|--------------|------------------|---------------|
-| Design product | Exact phrase in title | "product name" |
-| Functional device | Scene + device keywords | "scene device" |
-| Complex product | Inventor tracking | Find inventor from similar patent |
-
-## Step 1: Product Analysis
-
-**CRITICAL: Ask the user about HIDDEN FEATURES before searching!**
-
-E-commerce listings describe "selling points" but miss "patent points":
-- Listing says: "self watering pot with indicator"
-- Real patent may describe: "pot with rotatable bottom"
-
-Ask the user:
-1. "Does the product have structural features NOT mentioned in the listing?"
-2. "Check these areas: bottom structure, rotating parts, detachable mechanisms"
-3. "If you have product photos, check the bottom/side/back view"
-
-## Step 2: Construct Keywords
-
-Build keywords from:
-1. **Product category**: pot, ashtray, smoker, container
-2. **Core features**: self watering, detachable, rotatable
-3. **Hidden features** (from user input): mechanisms not visible in listing
-
-Remove: dimensions, colors, quantities, marketing words, brand names
-
-## Step 3: Multi-Strategy Search
-
-Use `ppubs_search_combined` for comprehensive coverage:
-```
-ppubs_search_combined("keywords from product")
-```
-
-This runs 4 strategies automatically:
-- Exact phrase search
-- Title search
-- Last 2-3 words search
-- AND combination search
-
-## Step 4: Inventor Tracking (Important!)
-
-When you find a relevant patent, check the inventor's other patents:
-```
-ppubs_get_inventor_patents("patent_number")
-```
-
-This discovers hidden related patents by the same inventor.
-Often reveals patents with different names but similar structures.
-
-## Step 5: Assignee Tracking
-
-Track company patent families:
-```
-ppubs_search_by_assignee("company name")
-```
-
-Finds continuation applications and related patents from the same company.
-
-## Step 6: Precise Title Search
-
-For design patents, use title search:
-```
-ppubs_search_by_ttl("product keywords")
-```
-
-Most effective for products with clear, specific names.
-
-## Step 7: Result Analysis
-
-For each patent found:
-1. Check if design patent (D-series) - often most relevant for products
-2. Compare title keywords match
-3. Note inventors for further tracking
-4. Check assignee for family relationships
-5. Verify the patent matches the product structure (not just name)
-
-## Key Success Factors
-
-| Factor | Implementation |
-|--------|---------------|
-| Keep original phrasing | Don't remove "stop words" like "with", "and" |
-| Inventor tracking | Always check inventor's other patents |
-| Multiple strategies | Use combined search, not single query |
-| Ask about hidden features | User input reveals unlisted structures |
-
-## Common Mistakes to Avoid
-
-| Mistake | Problem | Solution |
-|---------|---------|----------|
-| Filter stop words | USPTO needs exact phrase | Keep original phrasing |
-| Single search | Misses related patents | Use combined + inventor tracking |
-| Only listing keywords | Misses hidden features | Ask user about structure |
-| Ignore inventor info | Misses related patents | Track inventor's portfolio |
 """
 
 PATENT_LANDSCAPE_PROMPT = """
 # Patent Landscape Analysis Workflow
 
-Map the patent landscape for a technology area to understand the competitive environment.
+Map the patent landscape for a technology area using dual-engine search.
 
 ## Step 1: Define Technology Scope
 - Identify the core technology area
@@ -500,75 +213,197 @@ Map the patent landscape for a technology area to understand the competitive env
 
 ## Step 2: Identify Key CPC Classifications
 ```
-Use patentsview_lookup_cpc:
+get_cpc_info("G06")  → section overview
+get_cpc_info("G06N3/08")  → specific subclass
+```
 - Find relevant CPC codes
 - Map hierarchical relationships
-- Note any cross-cutting codes
-```
+- Note cross-cutting codes
 
-## Step 3: Quantitative Analysis
+## Step 3: Quantitative Search
 ```
-Use patentsview_search_by_cpc with large limits:
+gp_search_patents('cpc:"CODE"', type="ANY", limit=100)
+ppubs_search_patents('"CODE".cpc.', limit=100)
+```
 - Count total patents per CPC code
 - Track filings over time
 - Identify growth trends
-```
 
 ## Step 4: Top Assignee Analysis
 ```
-Use patentsview_search_assignees:
+ppubs_search_by_assignee("company name")
+```
 - Rank companies by patent count
 - Calculate market share of filings
 - Identify new entrants vs incumbents
-```
 
-## Step 5: Geographic Distribution
+## Step 5: Citation Network Analysis
 ```
-Use patentsview_search_patents with assignee filters:
-- Compare filing volumes by assignee location
-- Identify regional leaders among US filers
-- Note PCT (WO) filing trends via ppubs_search_applications
+ppubs_get_citation_network("foundational patent")
 ```
-
-## Step 6: Technology Clustering
-Group patents into sub-categories:
-- By specific CPC subclasses
-- By claim feature keywords
-- By application type (method, system, composition)
-
-## Step 7: Citation Network Analysis
-```
-Use get_enriched_citations:
 - Identify highly-cited foundational patents
-- Map citation relationships
+- Map citation relationships between companies
 - Find technology leaders by citation metrics
-```
 
-## Step 8: White Space Analysis
+## Step 6: Design Patent Coverage
+```
+gp_search_patents("product category", type="DESIGN")
+```
+- Design patents are often more relevant for consumer products
+- Google Patents ML ranking superior to PPUBS for design
+
+## Step 7: White Space Analysis
 Identify underserved areas:
 - CPC codes with low filing activity
 - Technology combinations not covered
 - Emerging areas with few patents
+"""
 
-## Deliverables:
-- Filing trend charts
-- Top assignee rankings
-- Technology taxonomy/map
-- Geographic distribution
-- Key/seminal patents
-- White space opportunities
+FREEDOM_TO_OPERATE_PROMPT = """
+# Freedom to Operate (FTO) Analysis Workflow
+
+Assess the risk of patent infringement for a product or technology using
+the dual-engine (PPUBS + Google Patents) tool set.
+
+## Step 1: Define the Product/Technology
+- List all technical features and components
+- Identify the country/countries of operation
+- Note planned manufacturing, sale, and use locations
+
+## Step 2: Keyword and Classification Search
+```
+gp_search_patents("product keywords", type="DESIGN")   → consumer product designs
+gp_search_patents("technical feature", type="PATENT")  → utility patents
+ppubs_search_combined("product description")           → PPUBS full-text
+```
+- Search for each technical feature
+- Use multiple synonyms and phrasings
+- Google for ML-ranked design discovery, PPUBS for full claims
+
+## Step 3: Identify Potentially Relevant Patents
+For each patent found, evaluate:
+- Is it still in force? (check dates)
+- Does it cover the geography of interest? (US only from these tools)
+- Are the claims potentially reading on the product?
+
+## Step 4: Detailed Claim Analysis
+```
+ppubs_get_full_document(guid, "USPAT")
+ppubs_get_patent_by_number("patent number")
+```
+- Read independent claims carefully
+- Compare each claim element to the product
+- Document any differences (design-arounds)
+
+## Step 5: Citation Network — Find Related Patents
+```
+ppubs_get_citation_network("key patent number")
+```
+- backward: prior art → might reveal additional risk patents through common ancestors
+- forward: later patents → designs that built on this one
+- Critical for finding patents with different titles in the same design family
+
+## Step 6: Similar Patent Discovery
+```
+gp_get_similar_patents("patent number")
+```
+- ML-based similar patent discovery
+- Often finds design patents with different names but similar appearance
+- Complements citation-based discovery
+
+## Step 7: Status Check
+```
+get_status_code("status code number")
+```
+- Verify patent status codes
+- Check if maintenance fees are current
+
+## Risk Assessment Categories:
+- **High Risk**: Claims appear to cover product, patent is valid and enforced
+- **Medium Risk**: Claims may cover, some validity questions, design-around possible
+- **Low Risk**: Clear non-infringement or strong invalidity arguments
+- **Clear**: No relevant patents found or all expired
+"""
+
+PRODUCT_PATENT_SEARCH_PROMPT = """
+# Product Patent Search Workflow (Optimized)
+
+Based on successful search experiences from real cases, this workflow implements
+proven strategies for finding product-related patents.
+
+## Key Tools and When to Use
+
+| Tool | Best For | Example |
+|------|----------|---------|
+| `gp_search_patents` | Design patents, products with visual features | `gp_search_patents("wooden cross", "DESIGN")` |
+| `ppubs_get_citation_network` | Complete patent family (ONE call) | `ppubs_get_citation_network("D656429")` |
+| `ppubs_search_combined` | Multi-strategy PPUBS search | `ppubs_search_combined("pot with rotatable bottom")` |
+| `ppubs_get_inventor_patents` | Track inventor's other patents | `ppubs_get_inventor_patents("D1066113")` |
+| `gp_get_similar_patents` | ML-based visual/CPC similarity | `gp_get_similar_patents("D656429")` |
+| `ppubs_search_by_ttl` | Exact title matching | `ppubs_search_by_ttl("self watering pot")` |
+| `ppubs_search_by_assignee` | Track company patent families | `ppubs_search_by_assignee("Soak Limited", "smoker")` |
+
+## Recommended Workflow
+
+### Phase 1: Discovery (Google Patents)
+```
+1. gp_search_patents("product keywords", "DESIGN")   → find core design patents
+2. gp_get_similar_patents("best match")              → ML-based similar designs
+3. gp_get_patent_detail("patent")                    → verify CPC, abstract
+```
+
+### Phase 2: Family Mapping (PPUBS Citations)
+```
+4. ppubs_get_citation_network("core patent")         → BIDIRECTIONAL: backward + forward
+   This ONE call replaces running citations + cited_by separately.
+   Finds patents that keyword search misses (e.g. generically titled "Cross").
+```
+
+### Phase 3: Deep Dive (PPUBS Full Text)
+```
+5. ppubs_get_full_document(guid, "USPAT")            → complete claims + description
+6. ppubs_get_inventor_patents("patent")              → find inventor's other designs
+7. ppubs_download_patent_pdf("patent number")        → official PDF for legal review
+```
+
+## Critical Strategy: Bidirectional Citation Network
+
+**Always run `ppubs_get_citation_network` on any core patent found.**
+
+Design patents with short/generic titles (e.g., "Cross") are INVISIBLE to
+keyword search. They can ONLY be found through forward citation traversal
+from earlier patents they cite. The citation_network tool handles BOTH
+directions in one call, preventing missed family members.
+
+## Success Pattern (Real Case: Cross Design Family)
+
+```
+gp_search_patents("wooden cross", "DESIGN")        → D656429 #1
+ppubs_get_citation_network("D656429")              → finds ALL 8+ family members
+  backward: 25 older cross designs
+  forward:  D1050666 "Cross", D1066113 "Religious cross", D786128 "Heart cross"...
+```
+
+## Common Mistakes to Avoid
+
+| Mistake | Problem | Solution |
+|---------|---------|----------|
+| Single-direction citations | Misses newer patents | Always use `ppubs_get_citation_network` |
+| PPUBS-only for design | TF-IDF bad for short titles | Use `gp_search_patents` for design discovery |
+| Skip inventor tracking | Misses related patents | Run `ppubs_get_inventor_patents` on top matches |
+| Filter stop words | PPUBS needs exact phrase | Keep original phrasing |
 """
 
 # Map of prompt names to content
 PROMPTS = {
     "prior_art_search": {
         "name": "Prior Art Search",
-        "description": "Guide for conducting a comprehensive prior art search",
+        "description": "Guide for conducting a comprehensive prior art search using PPUBS + Google Patents",
         "content": PRIOR_ART_SEARCH_PROMPT,
     },
     "patent_validity": {
         "name": "Patent Validity Analysis",
-        "description": "Guide for analyzing patent validity and prosecution history",
+        "description": "Guide for analyzing patent validity using citation networks and full documents",
         "content": PATENT_VALIDITY_ANALYSIS_PROMPT,
     },
     "competitor_portfolio": {
@@ -576,24 +411,19 @@ PROMPTS = {
         "description": "Guide for analyzing a company's patent portfolio",
         "content": COMPETITOR_PORTFOLIO_ANALYSIS_PROMPT,
     },
-    "ptab_research": {
-        "name": "PTAB Proceeding Research",
-        "description": "Guide for researching PTAB proceedings (IPR/PGR/CBM)",
-        "content": PTAB_PROCEEDING_RESEARCH_PROMPT,
-    },
-    "freedom_to_operate": {
-        "name": "Freedom to Operate Analysis",
-        "description": "Guide for FTO/infringement risk analysis",
-        "content": FREEDOM_TO_OPERATE_PROMPT,
-    },
     "patent_landscape": {
         "name": "Patent Landscape Analysis",
         "description": "Guide for mapping a technology patent landscape",
         "content": PATENT_LANDSCAPE_PROMPT,
     },
+    "freedom_to_operate": {
+        "name": "Freedom to Operate Analysis",
+        "description": "Guide for FTO/infringement risk analysis using dual-engine search",
+        "content": FREEDOM_TO_OPERATE_PROMPT,
+    },
     "product_patent_search": {
         "name": "Product Patent Search (Optimized)",
-        "description": "Guide for product patent search based on proven successful strategies",
+        "description": "Guide for product patent search with bidirectional citation strategy",
         "content": PRODUCT_PATENT_SEARCH_PROMPT,
     },
 }

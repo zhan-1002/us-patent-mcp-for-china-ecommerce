@@ -51,6 +51,11 @@ class Config:
     # Caching
     ENABLE_CACHING: bool = os.getenv("ENABLE_CACHING", "true").lower() == "true"
 
+    # Google Patents API
+    GP_BASE_URL: str = os.getenv("GP_BASE_URL", "https://patents.google.com")
+    GP_REQUEST_DELAY: float = float(os.getenv("GP_REQUEST_DELAY", "2.0"))
+    GP_REQUEST_TIMEOUT: float = float(os.getenv("GP_REQUEST_TIMEOUT", "30.0"))
+
     # Response Size Management (for LLM context windows)
     MAX_RESPONSE_TOKENS: int = int(os.getenv("MAX_RESPONSE_TOKENS", "8000"))
     TRUNCATE_LARGE_RESPONSES: bool = os.getenv("TRUNCATE_LARGE_RESPONSES", "true").lower() == "true"
