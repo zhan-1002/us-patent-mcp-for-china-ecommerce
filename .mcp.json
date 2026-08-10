@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "patents": {
+      "command": "uv",
+      "args": ["run", "patent-mcp-server"],
+      "description": "USPTO and Google Patents search optimized for Codex"
+    }
+  }
+}
