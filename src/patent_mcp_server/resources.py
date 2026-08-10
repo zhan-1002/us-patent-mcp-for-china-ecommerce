@@ -427,25 +427,27 @@ SEARCH_SYNTAX_GUIDE = """
 
 ## PPUBS (Patent Public Search)
 
-PPUBS uses a field-based search syntax:
+PPUBS uses a field-based search syntax with dotted suffixes:
 
 ### Common Fields:
-- `TTL/` - Title
-- `ABST/` - Abstract
-- `ACLM/` - All Claims
-- `SPEC/` - Specification/Description
-- `ISD/` - Issue Date (format: YYYYMMDD)
-- `APD/` - Application Date
-- `IN/` - Inventor Name
-- `AN/` - Assignee Name
-- `PN/` - Patent Number
-- `CPC/` - CPC Classification
+- `.ti.` - Title
+- `.abst.` - Abstract
+- `.aclm.` - All Claims
+- `.spec.` - Specification/Description
+- `.isd.` - Issue Date (format: YYYYMMDD)
+- `.apd.` - Application Date
+- `.in.` - Inventor Name
+- `.as.` - Assignee Name
+- `.pn.` - Patent Number
+- `.cpc.` - CPC Classification
+- `.urpn.` - U.S. Reference Patent Number (citations)
 
 ### Example Queries:
-- `TTL/"machine learning"` - Title contains "machine learning"
-- `IN/Smith AND AN/IBM` - Inventor Smith, assigned to IBM
-- `CPC/G06N3/08` - Neural network patents
-- `ISD/20230101->20231231` - Patents issued in 2023
+- `"machine learning".ti.` - Title contains "machine learning"
+- `Smith.in. AND IBM.as.` - Inventor Smith, assigned to IBM
+- `G06N3/08.cpc.` - Neural network patents
+- `20230101->20231231.isd.` - Patents issued in 2023
+- `"D656429".urpn.` - Patents that cite D656429
 
 ---
 

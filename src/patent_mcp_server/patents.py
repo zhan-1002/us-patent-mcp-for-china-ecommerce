@@ -1111,16 +1111,16 @@ def _normalize_pn(patent_number: str) -> str:
     pn = str(patent_number).strip()
     if not pn:
         return ""
-    # PPUBS format: "US D786128 S" → "D786128"
-    m = re.match(r'^US\s+([A-Z]\d+)\s+[A-Z]\d*$', pn)
+    # PPUBS format: "US D786128 S" → "D786128" / "US 12345678 S" → "12345678"
+    m = re.match(r'^US\s+([A-Z]?\d+)\s+[A-Z]\d*$', pn)
     if m:
         return m.group(1)
-    # Google format: "USD786128S1" → "D786128"
-    m = re.match(r'^US([A-Z]\d+)[A-Z]\d*$', pn)
+    # Google format: "USD786128S1" → "D786128" / "US12345678B2" → "12345678"
+    m = re.match(r'^US([A-Z]?\d+)[A-Z]\d*$', pn)
     if m:
         return m.group(1)
-    # Plain with trailing kind code: "D786128S" → "D786128"
-    m = re.match(r'^([A-Z]\d+)[A-Z]\d*$', pn)
+    # Plain with trailing kind code: "D786128S" → "D786128" / "12345678B2" → "12345678"
+    m = re.match(r'^([A-Z]?\d+)[A-Z]\d*$', pn)
     if m:
         return m.group(1)
     # Bare design patent (no kind code): "D1050666" → "D1050666"
@@ -1140,25 +1140,28 @@ def _is_design_patent(pn: str) -> bool:
     return bool(re.search(r'\bD\d', str(pn)))
 
 
-def _extract_urpn_patent_numbers(doc: Dict[str, Any]) -> list:
-    """Extract cited US patent numbers from a PPUBS document's urpn fields.
+# Direction-specific citation field groups
+_BACKWARD_CITATION_FIELDS = [
+    "urpn", "urpnCode", "usCitation", "citedPatents",
+    "backwardCitations", "backward_citations",
+    "referencesCited", "usPatentsCited",
+]
 
-    PPUBS returns citation data in various field names.  This function
-    probes the full document for any citation-bearing fields and returns
-    a deduplicated list of patent numbers (e.g. ``["D656429S", "1234567"]``).
+_FORWARD_CITATION_FIELDS = [
+    "forwardCitations", "forward_citations",
+    "citingPatents",
+]
+
+_ALL_CITATION_FIELDS = _BACKWARD_CITATION_FIELDS + _FORWARD_CITATION_FIELDS
+
+
+def _extract_pns_from_fields(doc: Dict[str, Any], fields: list) -> list:
+    """Extract patent numbers from *doc* for the given field names.
+
+    Returns a deduplicated, sorted list of patent number strings.
     """
     found: set = set()
-
-    # Candidate field names observed in PPUBS responses
-    citation_fields = [
-        "urpn", "urpnCode", "usCitation", "citedPatents",
-        "backwardCitations", "backward_citations",
-        "referencesCited", "usPatentsCited",
-        "forwardCitations", "forward_citations",
-        "citingPatents",
-    ]
-
-    for field in citation_fields:
+    for field in fields:
         values = doc.get(field, [])
         if not values:
             continue
@@ -1167,7 +1170,6 @@ def _extract_urpn_patent_numbers(doc: Dict[str, Any]) -> list:
                 if isinstance(item, str):
                     found.add(item)
                 elif isinstance(item, dict):
-                    # Try common sub-keys
                     for sub in ("patentNumber", "documentId", "number", "pn", "code"):
                         v = item.get(sub, "")
                         if v:
@@ -1175,20 +1177,22 @@ def _extract_urpn_patent_numbers(doc: Dict[str, Any]) -> list:
                             break
         elif isinstance(values, str):
             found.add(values)
-
     return sorted(found)
+
+
+def _extract_backward_citation_pns(doc: Dict[str, Any]) -> list:
+    """Extract BACKWARD citation patent numbers (patents THIS patent cites)."""
+    return _extract_pns_from_fields(doc, _BACKWARD_CITATION_FIELDS)
+
+
+def _extract_forward_citation_pns(doc: Dict[str, Any]) -> list:
+    """Extract FORWARD citation patent numbers (patents that cite THIS patent)."""
+    return _extract_pns_from_fields(doc, _FORWARD_CITATION_FIELDS)
 
 
 def _extract_citation_field_names(doc: Dict[str, Any]) -> list:
     """Return the names of citation-related fields actually present in *doc*."""
-    candidate = [
-        "urpn", "urpnCode", "usCitation", "citedPatents",
-        "backwardCitations", "backward_citations",
-        "referencesCited", "usPatentsCited",
-        "forwardCitations", "forward_citations",
-        "citingPatents",
-    ]
-    return [f for f in candidate if f in doc and doc[f]]
+    return [f for f in _ALL_CITATION_FIELDS if f in doc and doc[f]]
 
 
 # =====================================================================
@@ -1264,9 +1268,9 @@ async def ppubs_get_citations(patent_number: str) -> Dict[str, Any]:
             "hint": "Full document unavailable — citation fields extracted from search result only. Some citation data may be missing.",
         }
 
-    # 3. Extract citation data
+    # 3. Extract citation data — separate backward and forward
     field_names = _extract_citation_field_names(doc)
-    ref_pns = _extract_urpn_patent_numbers(doc)
+    ref_pns = _extract_backward_citation_pns(doc)
 
     # Separate design from utility
     designs = [p for p in ref_pns if _is_design_patent(p)]
@@ -1280,10 +1284,8 @@ async def ppubs_get_citations(patent_number: str) -> Dict[str, Any]:
             "type": "design" if _is_design_patent(p) else "utility",
         })
 
-    # Also check for forward citations
-    fwd_pns = _extract_urpn_patent_numbers(
-        {k: v for k, v in doc.items() if "forward" in k.lower() or "citing" in k.lower()}
-    ) if doc else []
+    # Forward citations
+    fwd_pns = _extract_forward_citation_pns(doc)
 
     return {
         "success": True,
@@ -1354,9 +1356,9 @@ async def ppubs_get_cited_by(patent_number: str, max_results: int = 50) -> Dict[
         if pn in str(patent_pn):
             continue
 
-        # Check if urpn is visible in the search result directly
-        refs = _extract_urpn_patent_numbers(patent)
-        if any(str(pn) == str(r) for r in refs):
+        # Check if this patent cites the target (backward references)
+        refs = _extract_backward_citation_pns(patent)
+        if any(_normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs):
             citing_patents.append({
                 "pn": patent_pn,
                 "title": patent.get("inventionTitle", patent.get("title", "")),
@@ -1438,7 +1440,7 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
     if guid:
         doc = await ppubs_client.get_document(guid, doc_type)
         if not is_error(doc):
-            ref_pns = _extract_urpn_patent_numbers(doc)
+            ref_pns = _extract_backward_citation_pns(doc)
             for rp in ref_pns:
                 entry = {"pn": rp, "type": "design" if _is_design_patent(rp) else "utility"}
                 backward_refs.append(entry)
@@ -1469,9 +1471,9 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
         fp_pn = fp.get("documentId", fp.get("patentNumber", ""))
         if pn in str(fp_pn):
             continue  # skip self
-        # Verify via urpn fields in the search result
-        refs = _extract_urpn_patent_numbers(fp)
-        if any(str(pn) == str(r) for r in refs):
+        # Verify this patent cites the target (backward references)
+        refs = _extract_backward_citation_pns(fp)
+        if any(_normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs):
             entry = {
                 "pn": fp_pn,
                 "title": fp.get("inventionTitle", fp.get("title", "")),
@@ -1545,14 +1547,30 @@ async def gp_search_patents(
         type: Patent type filter — "DESIGN" (default), "PATENT", or "ANY".
         limit: Maximum results (default 20, max 100).
         offset: Starting position for pagination (default 0).
+               NOTE: Google Patents paginates by page, not row; offset is
+               rounded down to the nearest multiple of limit.
 
     Returns:
         Standardized search results with pn, title, date, assignee, thumbnail_url.
     """
+    # Validate inputs
+    query = query.strip() if query else ""
+    if not query:
+        return ApiError.validation_error("query cannot be empty", field="query")
+
+    type_norm = type.strip().upper() if type else "DESIGN"
+    if type_norm not in ("DESIGN", "PATENT", "ANY"):
+        return ApiError.validation_error(
+            "type must be one of: DESIGN, PATENT, ANY", field="type",
+        )
+
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
     result = await gp_client.search(
         query=query,
-        type_filter=type,
-        limit=min(limit, 100),
+        type_filter=type_norm,
+        limit=limit,
         offset=offset,
     )
 
@@ -1649,6 +1667,15 @@ async def gp_get_citations(
     Returns:
         Dictionary with forward/backward citation lists.
     """
+    # Validate direction
+    valid_directions = {"forward", "backward", "both"}
+    direction = direction.strip().lower()
+    if direction not in valid_directions:
+        return ApiError.validation_error(
+            f"direction must be one of: {', '.join(sorted(valid_directions))}",
+            field="direction",
+        )
+
     try:
         pn = validate_google_pn(patent_number)
     except ValueError as e:

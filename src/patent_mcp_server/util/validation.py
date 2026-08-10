@@ -163,17 +163,18 @@ def validate_google_pn(patent_number: str) -> str:
     if re.match(r"^\d+$", pn):
         return pn
 
-    # Google format: USD1066113S1
-    m = re.match(r"^US([A-Z]\d+)[A-Z]\d*$", pn)
+    # Google format: USD1066113S1 (design) or US12345678B2 (utility)
+    # Body may start with a letter (design) or be purely numeric (utility).
+    m = re.match(r"^US([A-Z]?\d+)[A-Z]\d*$", pn)
     if m:
         return m.group(1)
 
-    # PPUBS format: US D1066113 S
-    m = re.match(r"^US\s+([A-Z]\d+)\s+[A-Z]\d*$", pn)
+    # PPUBS format: US D1066113 S or US 12345678 S
+    m = re.match(r"^US\s+([A-Z]?\d+)\s+[A-Z]\d*$", pn)
     if m:
         return m.group(1)
 
     raise ValueError(
         f"Unrecognized patent number format: {patent_number!r}. "
-        f"Expected formats: 'D1066113', 'USD1066113S1', or 'US D1066113 S'."
+        f"Expected formats: 'D1066113', 'USD1066113S1', '12345678', 'US12345678B2', or 'US D1066113 S'."
     )

@@ -1,19 +1,21 @@
-# USPTO Patent MCP Server (PPUBS-Only Version)
+# USPTO Patent MCP Server (PPUBS + Google Patents)
 
-> 🇨🇳 专为跨境电商产品设计人员优化的美国专利查询工具
+> 🇨🇳 专为跨境电商产品设计人员优化的双引擎美国专利查询工具
 >
-> A simplified USPTO Patent MCP Server optimized for China e-commerce product patent search.
+> A dual-engine USPTO Patent MCP Server optimized for China e-commerce product patent search.
 
-基于 [riemannzeta/patent_mcp_server](https://github.com/riemannzeta/patent_mcp_server) 修改的精简版本。
+基于 [riemannzeta/patent_mcp_server](https://github.com/riemannzeta/patent_mcp_server) 修改的增强版本。
 
 ## 与原版的区别
 
 | 特性 | 原版 | 本版本 |
 |------|------|--------|
 | API Key | ODP 工具需要 | **无需任何 API Key** |
-| 工具数量 | 52 个 | 13 个（精简核心功能） |
-| 目标用户 | 专业专利研究人员 | 跨电商产品设计人员 |
-| 搜索工作流 | 通用专利研究 | 产品专利搜索优化 |
+| 工具数量 | 52 个 | 20 个（双引擎核心功能） |
+| 搜索引擎 | PPUBS 单一引擎 | PPUBS + Google Patents 双引擎 |
+| 设计专利 | TF-IDF（效果差） | Google ML 排序 + 引用网络 |
+| 引用分析 | 无 | 双向引用网络 + urpn 提取 |
+| 目标用户 | 专业专利研究人员 | 跨境电商产品设计人员 |
 
 ## 主要功能
 
@@ -111,7 +113,7 @@ claude mcp add-json patents '{"command": "uv", "args": ["--directory", "/path/to
 | `ppubs_get_full_document` | 获取完整文档 | 获取专利全文 |
 | `ppubs_download_patent_pdf` | 下载 PDF | 保存专利文档 |
 
-### 新增搜索工具（本版本独有）
+### 增强搜索工具
 
 | 工具 | 功能 | 优势 |
 |------|------|------|
@@ -121,19 +123,36 @@ claude mcp add-json patents '{"command": "uv", "args": ["--directory", "/path/to
 | `ppubs_search_by_assignee` | 申请人搜索 | 按公司名称搜索 |
 | `ppubs_get_inventor_patents` | 自动发明人追踪 | 一键查找同发明人专利 |
 
-## 搜索技巧
+### Google Patents 工具（双引擎）
 
-### 设计专利搜索
+| 工具 | 功能 | 优势 |
+|------|------|------|
+| `gp_search_patents` | ML 排序搜索 | DESIGN/PATENT/ANY 分面，设计专利效果远超 PPUBS |
+| `gp_get_patent_detail` | 专利详情 | 含摘要、CPC、引用、缩略图 |
+| `gp_get_similar_patents` | ML 相似专利 | 基于 CPC + 标题关键词的相似设计发现 |
+| `gp_get_citations` | Google 引用图 | forward/backward/both 引用方向 |
+
+### 引用分析工具（新增）
+
+| 工具 | 功能 | 优势 |
+|------|------|------|
+| `ppubs_get_citation_network` | **双向引用网络（推荐）** | 一次调用获取 backward + forward 完整专利族 |
+| `ppubs_get_citations` | 提取 urpn 引用 | 从 PPUBS 完整文档提取引用专利号 |
+| `ppubs_get_cited_by` | 反向引用查询 | 发现哪些较新专利引用了目标专利 |
+
+## 搜索策略
+
+### 设计专利搜索（推荐工作流）
 ```
-使用 ppubs_search_by_ttl 进行标题精确搜索
-例：ppubs_search_by_ttl("self watering pot")
+1. gp_search_patents("产品关键词", "DESIGN")       → ML 排序发现核心设计专利
+2. ppubs_get_citation_network("核心专利号")          → 双向引用获取完整专利族
+3. gp_get_similar_patents("专利号")                  → ML 推荐相似设计
+4. ppubs_get_full_document(guid, "USPAT")           → 获取完整权利要求
 ```
 
-### 功能专利搜索
-```
-使用 ppubs_search_combined 进行多策略搜索
-例：ppubs_search_combined("camping table folding mechanism")
-```
+### 关键策略：双向引用网络
+设计专利常有极短标题（如"Cross"），关键词搜索无法发现。
+**必须对每个核心专利运行 `ppubs_get_citation_network`**，获取向前和向后完整引用链。
 
 ### 发明人追踪
 ```

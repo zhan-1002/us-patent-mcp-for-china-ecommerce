@@ -53,18 +53,18 @@ _BROWSER_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 # Patent-number format helpers
 # ---------------------------------------------------------------------------
 
-# US D1066113 S  →  D1066113
-_PPUBS_PN_RE = re.compile(r"^US\s+([A-Z]\d+)\s+[A-Z]\d*$")
+# US D1066113 S → D1066113  /  US 12345678 S → 12345678
+_PPUBS_PN_RE = re.compile(r"^US\s+([A-Z]?\d+)\s+[A-Z]\d*$")
 
-# USD1066113S1  →  D1066113
-_GOOGLE_PN_RE = re.compile(r"^US([A-Z]\d+)[A-Z]\d*$")
+# USD1066113S1 → D1066113  /  US12345678B2 → 12345678
+_GOOGLE_PN_RE = re.compile(r"^US([A-Z]?\d+)[A-Z]\d*$")
 
-# D1066113  (plain design)
-_PLAIN_DESIGN_RE = re.compile(r"^[A-Z]\d+$")
+# D1066113 (design) or 12345678 (utility)
+_PLAIN_PN_RE = re.compile(r"^[A-Z]?\d+$")
 
 
 def google_to_plain(pn: str) -> str:
-    """Convert Google Patents format to plain: USD1066113S1 → D1066113."""
+    """Convert Google format to plain: USD1066113S1 → D1066113, US12345678B2 → 12345678."""
     pn = pn.strip()
     m = _GOOGLE_PN_RE.match(pn)
     if m:
@@ -75,21 +75,32 @@ def google_to_plain(pn: str) -> str:
     return pn
 
 
-def plain_to_google(pn: str, kind: str = "S1") -> str:
-    """Convert plain patent number to Google format: D1066113 → USD1066113S1."""
+def plain_to_google(pn: str, kind: str = "") -> str:
+    """Convert plain to Google format: D1066113 → USD1066113S1, 12345678 → US12345678B2.
+
+    *kind* defaults to ``"S1"`` for design patents and ``"B2"`` for utility.
+    """
     pn = pn.strip()
     if pn.startswith("US"):
         return pn  # already Google format
+    if not kind:
+        kind = "S1" if _is_design_plain(pn) else "B2"
     return f"US{pn}{kind}"
 
 
 def ppubs_to_plain(pn: str) -> str:
-    """Convert PPUBS format to plain: US D1066113 S → D1066113."""
+    """Convert PPUBS format to plain: US D1066113 S → D1066113, US 12345678 S → 12345678."""
     pn = pn.strip()
     m = _PPUBS_PN_RE.match(pn)
     if m:
         return m.group(1)
     return pn
+
+
+def _is_design_plain(pn: str) -> bool:
+    """Return True if *pn* is a plain design patent number (starts with a letter)."""
+    pn = pn.strip()
+    return bool(pn) and pn[0].isalpha()
 
 
 def plain_to_ppubs(pn: str) -> str:
