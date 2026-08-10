@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "patent-mcp-server"
-version = "1.0.0"
+version = "1.1.0"
 description = "Model Context Protocol server for USPTO patent data"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -50,7 +50,7 @@ dev = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["patent_mcp_server", "patent_mcp_server.uspto", "patent_mcp_server.util", "patent_mcp_server.patentsview", "patent_mcp_server.google"]
+packages = ["patent_mcp_server", "patent_mcp_server.uspto", "patent_mcp_server.util", "patent_mcp_server.patentsview", "patent_mcp_server.google", "patent_mcp_server.json"]
 
 [tool.setuptools.package-data]
 patent_mcp_server = ["json/*.json"]

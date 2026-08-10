@@ -1,0 +1,51 @@
+{
+  "tape_measure": {
+    "label": "卷尺",
+    "type": "DESIGN",
+    "queries": ["tape measure", "measuring tape", "retractable tape measure"],
+    "expected_patents": ["D686514", "D686515"],
+    "evidence": "美国专利搜索资料_2026-08-07/02_检索脚本与结果/tape_measure_results.json"
+  },
+  "music_box": {
+    "label": "音乐盒",
+    "type": "DESIGN",
+    "queries": ["music box", "mini music box", "hand crank music box"],
+    "expected_patents": ["D1045975", "D1030857", "D983257", "D972631", "D971312"],
+    "evidence": "美国专利搜索资料_2026-08-07/历史检索结果"
+  },
+  "double_lever_corkscrew": {
+    "label": "双杠杆开瓶器",
+    "type": "PATENT",
+    "queries": ["corkscrew double lever", "double fulcrum corkscrew", "wine bottle opener lever"],
+    "expected_patents": ["8881623"],
+    "evidence": "美国专利搜索资料_2026-08-07/02_检索脚本与结果/corkscrew_search_results.txt"
+  },
+  "stocking_holder": {
+    "label": "圣诞袜支架",
+    "type": "DESIGN",
+    "queries": ["Christmas stocking holder", "Christmas stocking display rack"],
+    "expected_patents": ["D553874"],
+    "evidence": "美国专利搜索资料_2026-08-07/02_检索脚本与结果/stocking_holder_search_results.txt"
+  },
+  "candy_cane_ornament": {
+    "label": "糖果手杖装饰件",
+    "type": "DESIGN",
+    "queries": ["candy cane ornament", "candy cane piece"],
+    "expected_patents": ["D785900"],
+    "evidence": "美国专利搜索资料_2026-08-07/02_检索脚本与结果/candy_ornament_search_results.txt"
+  },
+  "liquor_pour_spout": {
+    "label": "瓶口倒液嘴",
+    "type": "DESIGN",
+    "queries": ["bottle pour spout", "liquor pourer", "bottle pourer", "pour spout", "olive oil nozzle"],
+    "expected_patents": ["D951706"],
+    "evidence": "美国专利搜索资料_2026-08-07/01_聊天记录/专利搜索聊天记录_用户与助手可见内容.md"
+  },
+  "religious_cross": {
+    "label": "宗教十字架",
+    "type": "DESIGN",
+    "queries": ["religious cross", "wooden cross", "heart cross", "cross ornament", "cross"],
+    "expected_patents": ["D1066113", "D1050666", "D786128", "D656429", "D638741"],
+    "evidence": "用户提供的旧工具检索与重点专利对比截图"
+  }
+}

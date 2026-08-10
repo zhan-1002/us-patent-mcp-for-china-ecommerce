@@ -27,7 +27,7 @@ class PatentNumberInput(BaseModel):
         """
         import re
 
-        pn = str(v).strip()
+        pn = str(v).strip().upper()
         if not pn:
             raise ValueError("Patent number cannot be empty")
 

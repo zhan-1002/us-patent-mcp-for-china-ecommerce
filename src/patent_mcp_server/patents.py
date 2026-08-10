@@ -9,14 +9,15 @@ with USPTO patent and trademark data APIs:
 
 The server uses stdio transport for Claude Code/Cursor integration.
 
-Version: 0.10.0 - Added trademark search support (no API key required)
+Version: 1.1.0 - Paginated aggregation, recall regression, and Codex UX
 """
-import atexit
 import json
 import logging
 import re
 import sys
-from typing import Any, Dict
+import warnings
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -25,6 +26,13 @@ from patent_mcp_server.constants import Sources, Fields
 from patent_mcp_server.util.errors import ApiError, is_error
 from patent_mcp_server.util.validation import validate_patent_number, validate_google_pn
 from patent_mcp_server.util.response import ResponseEnvelope, check_and_truncate
+from patent_mcp_server.util.aggregation import (
+    evaluate_recall,
+    load_recall_baselines,
+    merge_patent_results,
+    normalize_patent_number,
+    render_codex_markdown,
+)
 from patent_mcp_server.resources import (
     get_cpc_section_info, get_cpc_subsection_info,
     get_status_code_info, get_all_status_codes,
@@ -36,8 +44,24 @@ from patent_mcp_server.uspto.ppubs_uspto_gov import PpubsClient
 from patent_mcp_server.uspto.tmsearch_client import TmSearchClient
 from patent_mcp_server.google import GooglePatentsClient
 
-# Initialize FastMCP server
-mcp = FastMCP("uspto_patent_tools")
+@asynccontextmanager
+async def server_lifespan(_server):
+    """Close HTTP clients in the same event loop that served requests."""
+    try:
+        yield {}
+    finally:
+        await cleanup()
+
+
+# MCP 1.x currently exposes a generic lifespan annotation that
+# pydantic-settings cannot fully resolve while reading environment settings.
+# The runtime value is valid; keep this dependency warning out of MCP stdio.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Field 'lifespan' has an incomplete definition.*",
+    )
+    mcp = FastMCP("uspto_patent_tools", lifespan=server_lifespan)
 
 # Set up logging with configured level
 logging.basicConfig(
@@ -58,9 +82,16 @@ gp_client = GooglePatentsClient()
 tmsearch_client = TmSearchClient()
 
 
-# Register cleanup handler
+# Cleanup handler used by the FastMCP lifespan and direct callers in tests.
+_cleanup_complete = False
+
+
 async def cleanup():
     """Clean up resources on shutdown."""
+    global _cleanup_complete
+    if _cleanup_complete:
+        return
+
     logger.info("Shutting down USPTO Patent MCP server, cleaning up resources...")
     try:
         await ppubs_client.close()
@@ -73,33 +104,8 @@ async def cleanup():
         logger.info("TmSearch cleanup completed")
     except Exception as e:
         logger.error(f"Error during TmSearch cleanup: {str(e)}")
+    _cleanup_complete = True
     logger.info("Cleanup completed successfully")
-
-
-# Register cleanup with atexit (best effort for stdio shutdown)
-def sync_cleanup():
-    """Synchronous cleanup wrapper for atexit."""
-    import asyncio
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                loop.create_task(cleanup())
-                return
-        except RuntimeError:
-            pass
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(cleanup())
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.debug(f"Cleanup during shutdown (non-critical): {str(e)}")
-
-
-atexit.register(sync_cleanup)
 
 
 # =====================================================================
@@ -176,6 +182,12 @@ async def resource_search_syntax() -> str:
     return get_search_syntax_guide()
 
 
+@mcp.resource("patents://recall-baselines")
+async def resource_recall_baselines() -> str:
+    """List versioned historical recall samples used for regression checks."""
+    return json.dumps(load_recall_baselines(), ensure_ascii=False, indent=2)
+
+
 # =====================================================================
 # MCP Prompts - Workflow templates accessible via / commands
 # =====================================================================
@@ -208,16 +220,6 @@ async def competitor_portfolio_analysis() -> str:
     technology focus areas, and patent strategy.
     """
     return get_prompt("competitor_portfolio")["content"]
-
-
-@mcp.prompt()
-async def ptab_proceeding_research() -> str:
-    """Guide for researching PTAB proceedings (IPR/PGR/CBM).
-
-    USE THIS PROMPT WHEN: You need to research Patent Trial and Appeal Board
-    proceedings, decisions, and outcomes for validity challenges.
-    """
-    return get_prompt("ptab_research")["content"]
 
 
 @mcp.prompt()
@@ -256,27 +258,20 @@ async def product_patent_search() -> str:
     return get_prompt("product_patent_search")["content"]
 
 
-@mcp.prompt()
-async def patent_cross_validation() -> str:
-    """USPTO + Patsnap dual-source cross-validation workflow.
-
-    USE THIS PROMPT WHEN: You need comprehensive patent search with
-    cross-validation across independent data sources. Covers US patents
-    via USPTO and global patents (including China) via Patsnap.
-
-    This workflow:
-    - Runs both USPTO and Patsnap searches in parallel
-    - Cross-compares results to identify gaps
-    - Leverages Patsnap's image-based design search
-    - Expands coverage beyond US to Chinese patents
-    - Produces a confidence-rated cross-validation report
-    """
-    return get_prompt("patent_cross_validation")["content"]
-
-
 # =====================================================================
 # Helper Functions
 # =====================================================================
+
+
+def _find_exact_patent(patents: list, patent_number: str):
+    """Return only a record whose publication number exactly matches."""
+    target = _normalize_pn(patent_number)
+    for patent in patents:
+        candidate = patent.get("documentId", patent.get("patentNumber", ""))
+        if _normalize_pn(candidate) == target:
+            return patent
+    return None
+
 
 async def _search_patent_by_number(patent_number: str) -> Dict[str, Any]:
     """Search for a patent by number and return the patent document metadata."""
@@ -294,9 +289,10 @@ async def _search_patent_by_number(patent_number: str) -> Dict[str, Any]:
 
     patents = result.get(Fields.PATENTS, result.get(Fields.DOCS, []))
 
-    if patents and len(patents) > 0:
-        logger.info(f"Found patent: {patents[0].get(Fields.GUID)}")
-        return {"success": True, "patent": patents[0]}
+    patent = _find_exact_patent(patents, patent_number)
+    if patent:
+        logger.info(f"Found patent: {patent.get(Fields.GUID)}")
+        return {"success": True, "patent": patent}
 
     # Try alternative query format
     alternative_query = f'"{patent_number}".pn.'
@@ -313,11 +309,12 @@ async def _search_patent_by_number(patent_number: str) -> Dict[str, Any]:
 
     patents = result.get(Fields.PATENTS, result.get(Fields.DOCS, []))
 
-    if not patents or len(patents) == 0:
+    patent = _find_exact_patent(patents, patent_number)
+    if not patent:
         return ApiError.not_found("Patent", patent_number)
 
-    logger.info(f"Found patent: {patents[0].get(Fields.GUID)}")
-    return {"success": True, "patent": patents[0]}
+    logger.info(f"Found patent: {patent.get(Fields.GUID)}")
+    return {"success": True, "patent": patent}
 
 
 # =====================================================================
@@ -408,6 +405,8 @@ async def check_api_status() -> Dict[str, Any]:
             "gp_get_citations",
             "tmsearch_search",
             "tmsearch_get_by_serial",
+            "patent_search_aggregated",
+            "patent_evaluate_recall",
             "check_api_status",
             "get_cpc_info",
             "get_status_code",
@@ -427,6 +426,8 @@ async def check_api_status() -> Dict[str, Any]:
             "gp_get_citations": "Forward/backward citation graph from Google Patents",
             "tmsearch_search": "US trademark full-text search (no API key)",
             "tmsearch_get_by_serial": "Look up trademark by serial number",
+            "patent_search_aggregated": "Bounded multi-query pagination, de-duplication, and Codex layout",
+            "patent_evaluate_recall": "Regression check against versioned old-tool patent samples",
         },
         "dual_engine_strategy": {
             "description": "PPUBS + Google Patents complement each other. Use GP for design patent discovery (ML ranking beats TF-IDF), then PPUBS for full legal text.",
@@ -1295,7 +1296,7 @@ def _normalize_pn(patent_number: str) -> str:
     kind-code suffix (``D656429S``), and bare plain (``D656429``).
     Returns the plain form or the empty string when the input is unrecognised.
     """
-    pn = str(patent_number).strip()
+    pn = str(patent_number).strip().upper()
     if not pn:
         return ""
     # PPUBS format: "US D786128 S" → "D786128" / "US 12345678 S" → "12345678"
@@ -1624,6 +1625,7 @@ async def tmsearch_get_by_serial(serial_number: str) -> Dict[str, Any]:
         "status": record.get("statusDescription", "N/A"),
     }
 
+@mcp.tool()
 async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) -> Dict[str, Any]:
     """Bidirectional citation network — both backward AND forward citations.
 
@@ -1988,6 +1990,310 @@ async def gp_get_citations(
         response["forward_count"] = len(forward)
 
     return check_and_truncate(response)
+
+
+# =====================================================================
+# Aggregated Search and Historical Recall Evaluation
+# =====================================================================
+
+async def _collect_aggregated_pages(
+    source: str,
+    query: str,
+    type_filter: str,
+    page_size: int,
+    max_pages: int,
+    request_budget: int,
+) -> Dict[str, Any]:
+    """Collect bounded pages from one source while preserving diagnostics."""
+    collected: List[Dict[str, Any]] = []
+    requests = 0
+    total: Optional[int] = None
+    error = None
+    effective_page_size = min(page_size, 100 if source == "google_patents" else 500)
+    executed_query = query
+    if source == "ppubs" and type_filter == "DESIGN" and not re.search(r"\.\w+\.|@\w+", query):
+        phrase = query.strip().strip('"').replace('"', '\\"')
+        executed_query = f'("{phrase}").ti.'
+
+    for page in range(max_pages):
+        if requests >= request_budget:
+            break
+        offset = page * effective_page_size
+        requests += 1
+        if source == "google_patents":
+            try:
+                response = await gp_client.search(
+                    query=query,
+                    type_filter=type_filter,
+                    limit=effective_page_size,
+                    offset=offset,
+                    retry_on_503=False,
+                )
+            except Exception as exc:
+                error = f"Google Patents request failed: {type(exc).__name__}: {exc}"
+                break
+            if is_error(response):
+                error = response.get("message", "Google Patents request failed")
+                break
+            rows = response.get("results", [])
+            total = response.get("total", len(rows))
+        else:
+            try:
+                response = await ppubs_client.run_query(
+                    query=executed_query,
+                    start=offset,
+                    limit=effective_page_size,
+                    sources=[Sources.GRANTED_PATENTS],
+                    default_operator="AND",
+                )
+            except Exception as exc:
+                error = f"PPUBS request failed: {type(exc).__name__}: {exc}"
+                break
+            if is_error(response):
+                error = response.get("message", "PPUBS request failed")
+                break
+            envelope = ResponseEnvelope.from_ppubs(response, offset, effective_page_size)
+            rows = envelope.get("results", [])
+            total = envelope.get("total", len(rows))
+
+        collected.extend(rows)
+        if not rows or len(rows) < effective_page_size:
+            break
+        # Google reports a stable global total. PPUBS often caps numFound at
+        # pageCount, so treating it as a global total would stop after page 1.
+        if source == "google_patents" and isinstance(total, int) and offset + len(rows) >= total:
+            break
+
+    return {
+        "source": source,
+        "query": query,
+        "executed_query": executed_query,
+        "results": collected,
+        "collected": len(collected),
+        "total": total,
+        "requests": requests,
+        "error": error,
+    }
+
+
+@mcp.tool()
+async def patent_search_aggregated(
+    queries: Optional[List[str]] = None,
+    type: Optional[str] = None,
+    sources: str = "BOTH",
+    max_results: int = 300,
+    page_size: int = 100,
+    max_pages: int = 3,
+    max_requests: int = 18,
+    baseline_name: Optional[str] = None,
+    expected_patents: Optional[List[str]] = None,
+    minimum_recall: float = 1.0,
+    codex_top_n: int = 12,
+    expand_citations: bool = True,
+    citation_seed_limit: int = 3,
+) -> Dict[str, Any]:
+    """Run bounded multi-query, multi-page search with recall regression.
+
+    USE THIS TOOL WHEN: A product search must be comprehensive rather than a
+    single-page preview. It searches Google Patents and/or USPTO PPUBS,
+    paginates each query, merges duplicate patent numbers, and optionally
+    checks that historical patents are still recalled.
+
+    Args:
+        queries: Natural-language or engine-compatible queries. When omitted,
+            queries are loaded from ``baseline_name``.
+        type: DESIGN, PATENT, or ANY. A baseline's recommended type is used
+            when this is omitted; otherwise defaults to DESIGN.
+        sources: BOTH, GOOGLE, or PPUBS.
+        max_results: Maximum merged unique patents returned (1-2000).
+        page_size: Page size per request (Google capped at 100, PPUBS at 500).
+        max_pages: Maximum pages per query/source (1-20).
+        max_requests: Global network request budget (1-100).
+        baseline_name: Historical sample in ``patents://recall-baselines``.
+        expected_patents: Additional/alternative expected patent numbers.
+        minimum_recall: Regression pass threshold from 0 to 1.
+        codex_top_n: Rows shown in the chat-friendly Markdown table.
+        expand_citations: Expand top design candidates through bidirectional
+            PPUBS citations; recommended because generic titles evade keywords.
+        citation_seed_limit: Maximum top candidates expanded (1-5).
+
+    Returns:
+        Structured full results plus ``codex_markdown`` for a concise Codex
+        chat layout with search summary, clickable comparison table, and recall.
+    """
+    source_mode = (sources or "BOTH").strip().upper()
+    if source_mode not in {"BOTH", "GOOGLE", "PPUBS"}:
+        return ApiError.validation_error("sources must be BOTH, GOOGLE, or PPUBS", "sources")
+
+    baselines = load_recall_baselines()
+    baseline = None
+    if baseline_name:
+        baseline = baselines.get(baseline_name)
+        if baseline is None:
+            return ApiError.validation_error(
+                f"Unknown baseline_name: {baseline_name}. Available: {', '.join(sorted(baselines))}",
+                "baseline_name",
+            )
+
+    type_filter = (type or (baseline or {}).get("type") or "DESIGN").strip().upper()
+    if type_filter not in {"DESIGN", "PATENT", "ANY"}:
+        return ApiError.validation_error("type must be DESIGN, PATENT, or ANY", "type")
+
+    search_queries = [str(q).strip() for q in (queries or (baseline or {}).get("queries", [])) if str(q).strip()]
+    if not search_queries:
+        return ApiError.validation_error("queries or baseline_name is required", "queries")
+
+    max_results = max(1, min(int(max_results), 2000))
+    page_size = max(1, min(int(page_size), 500))
+    max_pages = max(1, min(int(max_pages), 20))
+    max_requests = max(1, min(int(max_requests), 100))
+    minimum_recall = max(0.0, min(float(minimum_recall), 1.0))
+    codex_top_n = max(1, min(int(codex_top_n), 50))
+    citation_seed_limit = max(1, min(int(citation_seed_limit), 5))
+
+    engines = []
+    if source_mode in {"BOTH", "GOOGLE"}:
+        engines.append("google_patents")
+    if source_mode in {"BOTH", "PPUBS"}:
+        engines.append("ppubs")
+
+    batches = []
+    used_requests = 0
+    disabled_engines = set()
+    for query in search_queries:
+        for engine in engines:
+            if engine in disabled_engines:
+                continue
+            remaining = max_requests - used_requests
+            if remaining <= 0:
+                break
+            batch = await _collect_aggregated_pages(
+                engine,
+                query,
+                type_filter,
+                page_size,
+                min(max_pages, remaining),
+                remaining,
+            )
+            batches.append(batch)
+            used_requests += batch["requests"]
+            if batch.get("error"):
+                # Circuit-break a failing source for the rest of this chat turn.
+                # This avoids repeated 503/WAF calls while preserving results
+                # from the other engine and making the partial failure visible.
+                disabled_engines.add(engine)
+        if used_requests >= max_requests:
+            break
+
+    collected_rows = sum(len(batch.get("results", [])) for batch in batches)
+    all_results = merge_patent_results(batches, max_results=max(collected_rows, 1))
+    if type_filter == "DESIGN":
+        all_results = [item for item in all_results if item["patent_number"].startswith("D")]
+    elif type_filter == "PATENT":
+        all_results = [item for item in all_results if not item["patent_number"].startswith("D")]
+
+    citation_seeds = []
+    if expand_citations and type_filter == "DESIGN" and source_mode in {"BOTH", "PPUBS"}:
+        for seed in all_results[:citation_seed_limit]:
+            # Citation network performs approximately three PPUBS operations:
+            # source lookup, full-document fetch, and forward-citation query.
+            if used_requests + 3 > max_requests:
+                break
+            seed_number = seed["patent_number"]
+            network = await ppubs_get_citation_network(seed_number, max_forward=100)
+            used_requests += 3
+            if is_error(network):
+                batches.append({
+                    "source": "ppubs_citations",
+                    "query": f"citation:{seed_number}",
+                    "executed_query": f"citation:{seed_number}",
+                    "results": [],
+                    "collected": 0,
+                    "total": 0,
+                    "requests": 3,
+                    "error": network.get("message", "Citation expansion failed"),
+                })
+                continue
+            citation_rows = list(network.get("backward", [])) + list(network.get("forward", []))
+            citation_rows = [
+                row for row in citation_rows
+                if normalize_patent_number(row.get("pn", "")).startswith("D")
+            ]
+            citation_seeds.append(seed_number)
+            batches.append({
+                "source": "ppubs_citations",
+                "query": f"citation:{seed_number}",
+                "executed_query": f"citation:{seed_number}",
+                "results": citation_rows,
+                "collected": len(citation_rows),
+                "total": len(citation_rows),
+                "requests": 3,
+                "error": None,
+            })
+
+        collected_rows = sum(len(batch.get("results", [])) for batch in batches)
+        all_results = merge_patent_results(batches, max_results=max(collected_rows, 1))
+        all_results = [item for item in all_results if item["patent_number"].startswith("D")]
+
+    results = all_results[:max_results]
+    expected = list(expected_patents or [])
+    if baseline:
+        expected.extend(baseline.get("expected_patents", []))
+    recall = evaluate_recall(
+        (item["patent_number"] for item in all_results),
+        expected,
+        minimum_recall,
+    ) if expected else None
+
+    query_stats = [
+        {key: batch.get(key) for key in ("source", "query", "executed_query", "collected", "total", "requests", "error")}
+        for batch in batches
+    ]
+    return {
+        "success": True,
+        "source": "aggregated",
+        "baseline_name": baseline_name,
+        "queries": search_queries,
+        "type": type_filter,
+        "engines": engines,
+        "disabled_engines": sorted(disabled_engines),
+        "citation_seeds": citation_seeds,
+        "request_budget": max_requests,
+        "requests_used": used_requests,
+        "retrieved_unique_count": len(all_results),
+        "unique_count": len(results),
+        "query_stats": query_stats,
+        "recall": recall,
+        "results": results,
+        "codex_markdown": render_codex_markdown(query_stats, results, recall, codex_top_n),
+        "ux_hint": "In Codex, present codex_markdown first; keep the full results collapsed unless requested.",
+    }
+
+
+@mcp.tool()
+async def patent_evaluate_recall(
+    retrieved_patents: List[str],
+    baseline_name: Optional[str] = None,
+    expected_patents: Optional[List[str]] = None,
+    minimum_recall: float = 1.0,
+) -> Dict[str, Any]:
+    """Evaluate new search results against historical old-tool samples."""
+    baselines = load_recall_baselines()
+    expected = list(expected_patents or [])
+    baseline = None
+    if baseline_name:
+        baseline = baselines.get(baseline_name)
+        if baseline is None:
+            return ApiError.validation_error(
+                f"Unknown baseline_name: {baseline_name}. Available: {', '.join(sorted(baselines))}",
+                "baseline_name",
+            )
+        expected.extend(baseline.get("expected_patents", []))
+    if not expected:
+        return ApiError.validation_error("baseline_name or expected_patents is required", "expected_patents")
+    result = evaluate_recall(retrieved_patents, expected, max(0.0, min(minimum_recall, 1.0)))
+    result.update({"success": True, "baseline_name": baseline_name, "baseline": baseline})
+    return result
 
 
 # =====================================================================

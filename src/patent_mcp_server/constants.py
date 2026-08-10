@@ -159,3 +159,27 @@ class GPTypeFilters:
     DESIGN = "DESIGN"
     PATENT = "PATENT"
     ANY = "ANY"  # no type filter applied
+
+
+class TrademarkDefaults:
+    """Default values for trademark search operations."""
+
+    SEARCH_LIMIT = 25
+    SEARCH_LIMIT_MAX = 100
+
+
+class TmSearchFields:
+    """Field names used by the tmsearch.uspto.gov internal search index."""
+
+    WORDMARK = "wordmark"
+    OWNER = "ownerFullText"
+    SERIAL_NUMBER = "id"
+    REGISTRATION_NUMBER = "registrationId"
+    INTERNATIONAL_CLASS = "internationalClass"
+    ALIVE = "alive"
+    GOODS_AND_SERVICES = "goodsAndServices"
+    MARK_TYPE = "markType"
+    REGISTRATION_DATE = "registrationDate"
+    ABANDON_DATE = "abandonDate"
+    STATUS_CODE = "statusCode"
+    STATUS_DESCRIPTION = "statusDescription"
