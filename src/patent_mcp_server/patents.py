@@ -324,9 +324,9 @@ async def check_api_status() -> Dict[str, Any]:
     gp_reachable = False
     gp_check_error = None
     try:
-        await gp_client._ensure_session()
-        # If _ensure_session didn't raise, the home page is reachable
-        gp_reachable = True
+        gp_reachable = await gp_client._ensure_session()
+        if not gp_reachable:
+            gp_check_error = "Home page unreachable (connection error, DNS failure, or timeout)"
     except Exception as exc:
         gp_check_error = f"Connectivity check failed: {exc}"
 
@@ -1170,11 +1170,19 @@ def _normalize_pn(patent_number: str) -> str:
 
 
 def _is_design_patent(pn: str) -> bool:
-    """Check if a patent number string represents a design patent."""
+    """Check if a patent number string represents a design patent.
+
+    Normalises the input first so that Google (``USD1066113S1``), PPUBS
+    (``US D1066113 S``), plain-with-kind-code (``D1066113S``), and bare
+    (``D1066113``) formats are all recognised correctly.
+    """
     if not pn:
         return False
-    # Design patents have 'D' as the kind letter
-    return bool(re.search(r'\bD\d', str(pn)))
+    normalised = _normalize_pn(str(pn))
+    if not normalised:
+        return False
+    # After normalisation, a design patent body starts with 'D'
+    return normalised[0] == 'D'
 
 
 # Direction-specific citation field groups
@@ -1428,7 +1436,6 @@ async def ppubs_get_cited_by(patent_number: str, max_results: int = 50) -> Dict[
             f"Found {len(citing_patents)} citing patents out of {checked} search results "
             f"({verified_count} verified via urpn fields, "
             f"{len(citing_patents) - verified_count} from .urpn. query hit without expanded urpn). "
-            f"Use ppubs_get_citations() on individual results for definitive citation data."
             f"Note: urpn data may not be present in basic search results — "
             f"use ppubs_get_citations() on individual results for definitive citation data."
         ),
@@ -1575,6 +1582,8 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
     return {
         "success": True,
         "source": "ppubs",
+        "partial": bool(warnings),
+        "warnings": warnings or None,
         "patent": {
             "pn": document_id,
             "title": title,

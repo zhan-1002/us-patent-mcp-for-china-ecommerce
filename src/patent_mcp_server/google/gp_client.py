@@ -158,15 +158,19 @@ class GooglePatentsClient:
     # Session management
     # ------------------------------------------------------------------
 
-    async def _ensure_session(self) -> None:
+    async def _ensure_session(self) -> bool:
         """Visit the Google Patents home page to obtain session cookies.
 
         Google sets tracking / bot-detection cookies on the first page load.
         Without them the XHR endpoint reliably returns 503 even from a
         clean IP with a browser User-Agent.
+
+        Returns:
+            ``True`` if the home page was successfully reached (any HTTP status),
+            ``False`` if a connection-level error occurred (DNS, timeout, etc.).
         """
         if self._session_ready:
-            return
+            return True
 
         logger.info("Establishing Google Patents session (visiting home page)")
         try:
@@ -181,9 +185,11 @@ class GooglePatentsClient:
             )
             # 200 or even a redirect/error page — we just need the cookies.
             self._session_ready = True
+            return True
         except Exception as exc:
             logger.warning("Home-page visit failed (%s); continuing anyway", exc)
             self._session_ready = True  # don't keep retrying
+            return False
 
     def _xhr_headers(self) -> Dict[str, str]:
         """Return headers that mimic an in-page XHR request."""

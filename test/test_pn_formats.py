@@ -117,12 +117,8 @@ class TestIsDesignPlain:
         assert _is_design_plain("") is False
 
     def test_whitespace_only(self):
-        """Whitespace-only string — strip makes it empty, first char access may fail."""
-        # Implementation uses pn[0].isalpha() after strip — whitespace-only
-        # becomes "" after strip, so accessing pn[0] would raise IndexError.
-        # This documents the behaviour; fix upstream if needed.
-        with pytest.raises(IndexError):
-            _is_design_plain("   ")
+        """Whitespace-only string — safely returns False (bool guard before isalpha)."""
+        assert _is_design_plain("   ") is False
 
 
 # ---------------------------------------------------------------------------
