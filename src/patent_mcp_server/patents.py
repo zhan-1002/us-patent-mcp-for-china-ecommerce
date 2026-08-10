@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from patent_mcp_server.config import config
 from patent_mcp_server.constants import Sources, Fields
 from patent_mcp_server.util.errors import ApiError, is_error
-from patent_mcp_server.util.validation import validate_patent_number
+from patent_mcp_server.util.validation import validate_patent_number, validate_google_pn
 from patent_mcp_server.util.response import ResponseEnvelope, check_and_truncate
 from patent_mcp_server.resources import (
     get_cpc_section_info, get_cpc_subsection_info,
@@ -32,6 +32,7 @@ from patent_mcp_server.resources import (
 )
 from patent_mcp_server.prompts import get_prompt
 from patent_mcp_server.uspto.ppubs_uspto_gov import PpubsClient
+from patent_mcp_server.google import GooglePatentsClient
 
 # Initialize FastMCP server
 mcp = FastMCP("uspto_patent_tools")
@@ -47,8 +48,9 @@ logger = logging.getLogger('uspto_patent_mcp')
 # Validate configuration
 config.validate()
 
-# Create client instance for PPUBS API
+# Create client instances
 ppubs_client = PpubsClient()
+gp_client = GooglePatentsClient()
 
 
 # Register cleanup handler
@@ -57,6 +59,7 @@ async def cleanup():
     logger.info("Shutting down USPTO Patent MCP server, cleaning up resources...")
     try:
         await ppubs_client.close()
+        await gp_client.close()
         logger.info("Cleanup completed successfully")
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
@@ -311,6 +314,13 @@ async def check_api_status() -> Dict[str, Any]:
                 "requires_auth": False,
                 "description": "Full-text search of US patents and applications",
             },
+            "google_patents": {
+                "name": "Google Patents",
+                "configured": True,
+                "requires_auth": False,
+                "description": "ML-ranked patent search with design patent faceting — supplements PPUBS",
+                "rate_limit_note": "Enforces >=2s delay between requests to avoid 503 bans",
+            },
         },
         "tools_available": [
             "ppubs_search_patents",
@@ -323,6 +333,13 @@ async def check_api_status() -> Dict[str, Any]:
             "ppubs_search_by_assignee",
             "ppubs_search_combined",
             "ppubs_get_inventor_patents",
+            "ppubs_get_citations",
+            "ppubs_get_cited_by",
+            "ppubs_get_citation_network",
+            "gp_search_patents",
+            "gp_get_patent_detail",
+            "gp_get_similar_patents",
+            "gp_get_citations",
             "check_api_status",
             "get_cpc_info",
             "get_status_code",
@@ -333,6 +350,19 @@ async def check_api_status() -> Dict[str, Any]:
             "ppubs_search_by_assignee": "Find all patents by company",
             "ppubs_search_combined": "Multi-strategy search (recommended for new searches)",
             "ppubs_get_inventor_patents": "Auto inventor tracking from a patent",
+            "ppubs_get_citations": "Extract urpn references from PPUBS full document",
+            "ppubs_get_cited_by": "Reverse citation lookup — who cited this patent?",
+            "ppubs_get_citation_network": "Bidirectional citation network (backward + forward in one call) — recommended",
+            "gp_search_patents": "Google Patents search with DESIGN/PATENT/ANY type filter",
+            "gp_get_patent_detail": "Google Patents detail with abstract, CPC, citations",
+            "gp_get_similar_patents": "ML-based similar patent discovery via CPC codes",
+            "gp_get_citations": "Forward/backward citation graph from Google Patents",
+        },
+        "dual_engine_strategy": {
+            "description": "PPUBS + Google Patents complement each other. Use GP for design patent discovery (ML ranking beats TF-IDF), then PPUBS for full legal text.",
+            "when_ppubs": "Full claims text, PDF downloads, authoritative USPTO data, urpn citation extraction",
+            "when_google": "Design patent search, citation browsing, ML-ranked keyword search",
+            "workflow": "gp_search_patents (discover) → ppubs_get_citation_network (bidirectional family) → gp_get_similar_patents (ML recommendations) → ppubs_get_full_document (get legal text)",
         },
     }
 
@@ -1065,6 +1095,609 @@ async def ppubs_get_inventor_patents(patent_number: str) -> Dict[str, Any]:
         "total": len(sorted_patents),
         "hint": f"Found {len(sorted_patents)} related patents from {len(applicants)} applicant(s)"
     }
+
+
+# =====================================================================
+# PPUBS Citation Helpers
+# =====================================================================
+
+def _normalize_pn(patent_number: str) -> str:
+    """Normalize any patent number format to plain form (e.g. ``"D656429"``).
+
+    Accepts Google (``USD656429S1``), PPUBS (``US D656429 S``), plain with
+    kind-code suffix (``D656429S``), and bare plain (``D656429``).
+    Returns the plain form or the empty string when the input is unrecognised.
+    """
+    pn = str(patent_number).strip()
+    if not pn:
+        return ""
+    # PPUBS format: "US D786128 S" → "D786128"
+    m = re.match(r'^US\s+([A-Z]\d+)\s+[A-Z]\d*$', pn)
+    if m:
+        return m.group(1)
+    # Google format: "USD786128S1" → "D786128"
+    m = re.match(r'^US([A-Z]\d+)[A-Z]\d*$', pn)
+    if m:
+        return m.group(1)
+    # Plain with trailing kind code: "D786128S" → "D786128"
+    m = re.match(r'^([A-Z]\d+)[A-Z]\d*$', pn)
+    if m:
+        return m.group(1)
+    # Bare design patent (no kind code): "D1050666" → "D1050666"
+    if re.match(r'^[A-Z]\d+$', pn):
+        return pn
+    # Bare digits (utility patent): "7123456" → "7123456"
+    if re.match(r'^\d+$', pn):
+        return pn
+    return ""
+
+
+def _is_design_patent(pn: str) -> bool:
+    """Check if a patent number string represents a design patent."""
+    if not pn:
+        return False
+    # Design patents have 'D' as the kind letter
+    return bool(re.search(r'\bD\d', str(pn)))
+
+
+def _extract_urpn_patent_numbers(doc: Dict[str, Any]) -> list:
+    """Extract cited US patent numbers from a PPUBS document's urpn fields.
+
+    PPUBS returns citation data in various field names.  This function
+    probes the full document for any citation-bearing fields and returns
+    a deduplicated list of patent numbers (e.g. ``["D656429S", "1234567"]``).
+    """
+    found: set = set()
+
+    # Candidate field names observed in PPUBS responses
+    citation_fields = [
+        "urpn", "urpnCode", "usCitation", "citedPatents",
+        "backwardCitations", "backward_citations",
+        "referencesCited", "usPatentsCited",
+        "forwardCitations", "forward_citations",
+        "citingPatents",
+    ]
+
+    for field in citation_fields:
+        values = doc.get(field, [])
+        if not values:
+            continue
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, str):
+                    found.add(item)
+                elif isinstance(item, dict):
+                    # Try common sub-keys
+                    for sub in ("patentNumber", "documentId", "number", "pn", "code"):
+                        v = item.get(sub, "")
+                        if v:
+                            found.add(str(v))
+                            break
+        elif isinstance(values, str):
+            found.add(values)
+
+    return sorted(found)
+
+
+def _extract_citation_field_names(doc: Dict[str, Any]) -> list:
+    """Return the names of citation-related fields actually present in *doc*."""
+    candidate = [
+        "urpn", "urpnCode", "usCitation", "citedPatents",
+        "backwardCitations", "backward_citations",
+        "referencesCited", "usPatentsCited",
+        "forwardCitations", "forward_citations",
+        "citingPatents",
+    ]
+    return [f for f in candidate if f in doc and doc[f]]
+
+
+# =====================================================================
+# PPUBS Citation Tools
+# =====================================================================
+
+@mcp.tool()
+async def ppubs_get_citations(patent_number: str) -> Dict[str, Any]:
+    """Get citation information for a patent from PPUBS full document.
+
+    USE THIS TOOL WHEN: You want to find out which patents a given patent
+    references (backward citations) and which patents cite it (forward citations).
+    Citation chains are critical for design patent discovery — design patents
+    often cite visually similar prior art.
+
+    Extracts urpn/urpnCode and other citation fields from the PPUBS full
+    document response. Design patents are flagged separately.
+
+    Args:
+        patent_number: Patent number in any format (e.g., "D786128S",
+                       "US D786128 S", "USD786128S1", or "786128").
+
+    Returns:
+        Dictionary with patent info, references list, and citation field names found.
+    """
+    pn = _normalize_pn(patent_number)
+    if not pn:
+        return ApiError.validation_error("Patent number cannot be empty", field="patent_number")
+
+    # 1. Find the patent metadata using the correct PPUBS query format
+    query = f'"{pn}".pn.'
+    logger.info(f"Searching for patent with citation query: {query}")
+    result = await ppubs_client.run_query(
+        query=query,
+        sources=[Sources.GRANTED_PATENTS],
+        limit=1,
+    )
+
+    if is_error(result):
+        return result
+
+    patents = result.get(Fields.PATENTS, result.get(Fields.DOCS, []))
+    if not patents:
+        return ApiError.not_found("Patent", pn)
+
+    patent = patents[0]
+    guid = patent.get(Fields.GUID)
+    doc_type = patent.get(Fields.TYPE, Sources.GRANTED_PATENTS)
+    document_id = patent.get("documentId", patent.get("patentNumber", pn))
+    title = patent.get("inventionTitle", patent.get("title", ""))
+
+    if not guid:
+        return ApiError.not_found("Patent GUID for", pn)
+
+    # 2. Get full document (contains citation fields)
+    doc = await ppubs_client.get_document(guid, doc_type)
+    if is_error(doc):
+        # Fallback: return what we have from the search result
+        field_names = _extract_citation_field_names(patent)
+        return {
+            "success": True,
+            "source": "ppubs",
+            "patent": {
+                "pn": document_id,
+                "title": title,
+                "guid": guid,
+            },
+            "references": [],
+            "cited_by": [],
+            "design_count": 0,
+            "total_count": 0,
+            "citation_fields_found": field_names,
+            "hint": "Full document unavailable — citation fields extracted from search result only. Some citation data may be missing.",
+        }
+
+    # 3. Extract citation data
+    field_names = _extract_citation_field_names(doc)
+    ref_pns = _extract_urpn_patent_numbers(doc)
+
+    # Separate design from utility
+    designs = [p for p in ref_pns if _is_design_patent(p)]
+    utilities = [p for p in ref_pns if not _is_design_patent(p)]
+
+    # Build reference list
+    references = []
+    for p in ref_pns:
+        references.append({
+            "pn": p,
+            "type": "design" if _is_design_patent(p) else "utility",
+        })
+
+    # Also check for forward citations
+    fwd_pns = _extract_urpn_patent_numbers(
+        {k: v for k, v in doc.items() if "forward" in k.lower() or "citing" in k.lower()}
+    ) if doc else []
+
+    return {
+        "success": True,
+        "source": "ppubs",
+        "patent": {
+            "pn": document_id,
+            "title": title,
+            "guid": guid,
+        },
+        "references": references,
+        "cited_by": [{"pn": p, "type": "design" if _is_design_patent(p) else "utility"} for p in fwd_pns],
+        "design_count": len(designs),
+        "utility_count": len(utilities),
+        "total_count": len(ref_pns),
+        "forward_count": len(fwd_pns),
+        "citation_fields_found": field_names,
+    }
+
+
+@mcp.tool()
+async def ppubs_get_cited_by(patent_number: str, max_results: int = 50) -> Dict[str, Any]:
+    """Reverse citation lookup — find patents that cite a given patent.
+
+    USE THIS TOOL WHEN: You found a relevant patent and want to discover
+    newer patents that reference it.  This is the "forward citation" path —
+    newer designs often cite earlier visually similar designs.
+
+    This tool searches for the patent number in PPUBS and inspects each
+    result's urpn field.  NOTE: this is an expensive operation (N+1 API
+    calls); max_results caps the search scope.
+
+    Args:
+        patent_number: Patent number to search for (e.g., "D656429S").
+        max_results: Maximum search results to inspect (default 50, max 100).
+
+    Returns:
+        Dictionary with the source patent and list of citing patents.
+    """
+    pn = _normalize_pn(patent_number)
+    if not pn:
+        return ApiError.validation_error("Patent number cannot be empty", field="patent_number")
+
+    max_results = min(max(max_results, 1), 100)
+
+    # Search for the patent number in urpn field of other patents
+    query = f'"{pn}".urpn.'
+    result = await ppubs_client.run_query(
+        query=query,
+        sources=[Sources.GRANTED_PATENTS],
+        limit=max_results,
+        sort="date_publ desc",
+    )
+
+    if is_error(result):
+        return result
+
+    patents = result.get(Fields.PATENTS, result.get(Fields.DOCS, []))
+    if not patents:
+        return ApiError.not_found("Patent references to", pn)
+
+    # Check each result's citations for the target patent
+    citing_patents = []
+    checked = 0
+    for patent in patents[:max_results]:
+        checked += 1
+        patent_pn = patent.get("documentId", patent.get("patentNumber", ""))
+        # Skip the patent itself
+        if pn in str(patent_pn):
+            continue
+
+        # Check if urpn is visible in the search result directly
+        refs = _extract_urpn_patent_numbers(patent)
+        if any(str(pn) == str(r) for r in refs):
+            citing_patents.append({
+                "pn": patent_pn,
+                "title": patent.get("inventionTitle", patent.get("title", "")),
+                "date": patent.get("datePublished", ""),
+                "type": "design" if _is_design_patent(patent_pn) else "utility",
+            })
+
+    return {
+        "success": True,
+        "source": "ppubs",
+        "patent": {"pn": pn},
+        "cited_by": citing_patents,
+        "count": len(citing_patents),
+        "checked": checked,
+        "hint": (
+            f"Found {len(citing_patents)} citing patents out of {checked} search results. "
+            f"Note: urpn data may not be present in basic search results — "
+            f"use ppubs_get_citations() on individual results for definitive citation data."
+        ),
+    }
+
+
+@mcp.tool()
+async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) -> Dict[str, Any]:
+    """Bidirectional citation network — both backward AND forward citations.
+
+    USE THIS TOOL WHEN: You found a core patent and want the COMPLETE patent
+    family in one call.  This is the recommended single-call replacement for
+    running ``ppubs_get_citations`` + ``ppubs_get_cited_by`` separately.
+
+    **Strategy**: design patents with short/generic titles (e.g. "Cross") are
+    invisible to keyword search.  They can ONLY be found through forward
+    citation traversal from earlier patents they cite.  This tool guarantees
+    both directions are covered.
+
+    Args:
+        patent_number: Patent number in any format.
+        max_forward: Maximum forward-citation search results to inspect
+                     (default 50, max 100).
+
+    Returns:
+        Dictionary with:
+        - ``patent`` — source patent metadata
+        - ``backward`` — patents THIS patent cites (older prior art)
+        - ``forward`` — patents that cite THIS patent (newer designs)
+        - ``backward_count`` / ``forward_count`` — counts
+        - ``design_count`` / ``utility_count`` — type breakdown
+        - ``family_summary`` — one-line summary of the citation network
+    """
+    pn = _normalize_pn(patent_number)
+    if not pn:
+        return ApiError.validation_error("Patent number cannot be empty", field="patent_number")
+
+    max_forward = min(max(max_forward, 1), 100)
+
+    # ── 1. Backward citations (full document urpn extraction) ──────────
+    query = f'"{pn}".pn.'
+    result = await ppubs_client.run_query(
+        query=query, sources=[Sources.GRANTED_PATENTS], limit=1,
+    )
+    if is_error(result):
+        return result
+
+    patents = result.get(Fields.PATENTS, result.get(Fields.DOCS, []))
+    if not patents:
+        return ApiError.not_found("Patent", pn)
+
+    patent = patents[0]
+    guid = patent.get(Fields.GUID)
+    doc_type = patent.get(Fields.TYPE, Sources.GRANTED_PATENTS)
+    document_id = patent.get("documentId", patent.get("patentNumber", pn))
+    title = patent.get("inventionTitle", patent.get("title", ""))
+    patent_date = patent.get("datePublished", "")
+
+    backward_refs: list = []
+    backward_designs: list = []
+    backward_utilities: list = []
+
+    if guid:
+        doc = await ppubs_client.get_document(guid, doc_type)
+        if not is_error(doc):
+            ref_pns = _extract_urpn_patent_numbers(doc)
+            for rp in ref_pns:
+                entry = {"pn": rp, "type": "design" if _is_design_patent(rp) else "utility"}
+                backward_refs.append(entry)
+                if _is_design_patent(rp):
+                    backward_designs.append(rp)
+                else:
+                    backward_utilities.append(rp)
+
+    # ── 2. Forward citations (.urpn. search) ───────────────────────────
+    fwd_query = f'"{pn}".urpn.'
+    fwd_result = await ppubs_client.run_query(
+        query=fwd_query,
+        sources=[Sources.GRANTED_PATENTS],
+        limit=max_forward,
+        sort="date_publ desc",
+    )
+    if is_error(fwd_result):
+        fwd_result = {Fields.PATENTS: []}
+
+    fwd_patents = fwd_result.get(Fields.PATENTS, fwd_result.get(Fields.DOCS, []))
+    forward_refs: list = []
+    forward_designs: list = []
+    forward_utilities: list = []
+    checked = 0
+
+    for fp in fwd_patents[:max_forward]:
+        checked += 1
+        fp_pn = fp.get("documentId", fp.get("patentNumber", ""))
+        if pn in str(fp_pn):
+            continue  # skip self
+        # Verify via urpn fields in the search result
+        refs = _extract_urpn_patent_numbers(fp)
+        if any(str(pn) == str(r) for r in refs):
+            entry = {
+                "pn": fp_pn,
+                "title": fp.get("inventionTitle", fp.get("title", "")),
+                "date": fp.get("datePublished", ""),
+                "type": "design" if _is_design_patent(fp_pn) else "utility",
+            }
+            forward_refs.append(entry)
+            if _is_design_patent(fp_pn):
+                forward_designs.append(fp_pn)
+            else:
+                forward_utilities.append(fp_pn)
+
+    # ── 3. Merge ───────────────────────────────────────────────────────
+    total_backward = len(backward_refs)
+    total_forward = len(forward_refs)
+    total_designs = len(backward_designs) + len(forward_designs)
+    total_utilities = len(backward_utilities) + len(forward_utilities)
+
+    # Build a one-line family summary
+    summary_parts = [f"{pn} ({title[:60]})"]
+    if total_backward:
+        summary_parts.append(f"cites {total_backward} patents ({len(backward_designs)} design)")
+    if total_forward:
+        summary_parts.append(f"cited by {total_forward} patents ({len(forward_designs)} design)")
+
+    return {
+        "success": True,
+        "source": "ppubs",
+        "patent": {
+            "pn": document_id,
+            "title": title,
+            "date": patent_date,
+            "guid": guid,
+        },
+        "backward": backward_refs,
+        "backward_count": total_backward,
+        "backward_design_count": len(backward_designs),
+        "backward_utility_count": len(backward_utilities),
+        "forward": forward_refs,
+        "forward_count": total_forward,
+        "forward_design_count": len(forward_designs),
+        "forward_utility_count": len(forward_utilities),
+        "forward_checked": checked,
+        "design_count": total_designs,
+        "utility_count": total_utilities,
+        "family_summary": " | ".join(summary_parts),
+    }
+
+
+# =====================================================================
+# Google Patents Tools
+# =====================================================================
+
+@mcp.tool()
+async def gp_search_patents(
+    query: str,
+    type: str = "DESIGN",
+    limit: int = 20,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Search US patents on Google Patents.
+
+    USE THIS TOOL WHEN: You need to search for design patents or when PPUBS
+    keyword search fails to find short-title design patents. Google Patents
+    uses ML-based ranking and a dedicated type=DESIGN facet that is far
+    superior to PPUBS TF-IDF for design patents.
+
+    Args:
+        query: Search query using Google Patents syntax. Supports quoted
+               phrases, AND/OR, inventor:"Name", assignee:"Company", cpc:"code".
+        type: Patent type filter — "DESIGN" (default), "PATENT", or "ANY".
+        limit: Maximum results (default 20, max 100).
+        offset: Starting position for pagination (default 0).
+
+    Returns:
+        Standardized search results with pn, title, date, assignee, thumbnail_url.
+    """
+    result = await gp_client.search(
+        query=query,
+        type_filter=type,
+        limit=min(limit, 100),
+        offset=offset,
+    )
+
+    if is_error(result):
+        return result
+
+    response = ResponseEnvelope.from_google(result, offset, limit)
+    return check_and_truncate(response)
+
+
+@mcp.tool()
+async def gp_get_patent_detail(patent_number: str) -> Dict[str, Any]:
+    """Get detailed patent information from Google Patents.
+
+    USE THIS TOOL WHEN: You have a patent number and need full details
+    including abstract, CPC classification, citations, and images.
+    Google Patents provides better legal status and citation graphs
+    than PPUBS, but does NOT include full claims text.
+
+    Args:
+        patent_number: Patent number in any format (e.g., "D1066113",
+                       "USD1066113S1", or "US D1066113 S").
+
+    Returns:
+        Full patent object with abstract, cpc_codes, citations, and metadata.
+    """
+    try:
+        pn = validate_google_pn(patent_number)
+    except ValueError as e:
+        return ApiError.validation_error(str(e), field="patent_number")
+
+    result = await gp_client.get_patent(pn)
+
+    if is_error(result):
+        return result
+
+    return check_and_truncate(result)
+
+
+@mcp.tool()
+async def gp_get_similar_patents(
+    patent_number: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """Get similar patents via Google Patents ML recommendations.
+
+    USE THIS TOOL WHEN: You found a relevant design patent and want to
+    discover visually or conceptually similar patents.  Google Patents
+    uses ML-based similarity combining CPC classification, citations,
+    and visual features.
+
+    Uses CPC-code-based similarity search (the ML similarity endpoint
+    is not publicly documented).  Falls back gracefully when no CPC
+    codes are available.
+
+    Args:
+        patent_number: Source patent number (any format).
+        limit: Maximum similar patents to return (default 10).
+
+    Returns:
+        Dictionary with source patent and ranked similar patents.
+    """
+    try:
+        pn = validate_google_pn(patent_number)
+    except ValueError as e:
+        return ApiError.validation_error(str(e), field="patent_number")
+
+    result = await gp_client.get_similar(pn, limit=limit)
+
+    if is_error(result):
+        return result
+
+    return check_and_truncate(result)
+
+
+@mcp.tool()
+async def gp_get_citations(
+    patent_number: str,
+    direction: str = "both",
+) -> Dict[str, Any]:
+    """Get forward/backward citations for a patent from Google Patents.
+
+    USE THIS TOOL WHEN: You want to trace the citation network around a
+    patent — which earlier patents it cites (backward) and which later
+    patents cite it (forward).  This is essential for design patent
+    landscape analysis.
+
+    Args:
+        patent_number: Patent number (any format).
+        direction: "forward" (patents that cite this one),
+                   "backward" (patents this one cites), or
+                   "both" (default).
+
+    Returns:
+        Dictionary with forward/backward citation lists.
+    """
+    try:
+        pn = validate_google_pn(patent_number)
+    except ValueError as e:
+        return ApiError.validation_error(str(e), field="patent_number")
+
+    # Get full detail first
+    detail = await gp_client.get_patent(pn)
+    if is_error(detail):
+        return detail
+
+    patent = detail.get("patent", {})
+
+    def _normalize_citations(raw_list):
+        """Convert raw citation objects to {pn, title, date} format."""
+        if not raw_list or not isinstance(raw_list, list):
+            return []
+        result = []
+        for c in raw_list:
+            if isinstance(c, str):
+                result.append({"pn": c, "title": "", "date": ""})
+            elif isinstance(c, dict):
+                result.append({
+                    "pn": c.get("publication_number", c.get("pn", c.get("number", ""))),
+                    "title": c.get("title", ""),
+                    "date": c.get("publication_date", c.get("date", "")),
+                })
+        return result
+
+    backward = _normalize_citations(patent.get("backward_citations", []))
+    forward = _normalize_citations(patent.get("forward_citations", []))
+
+    # Filter by direction
+    response = {
+        "success": True,
+        "source": "google_patents",
+        "patent": {
+            "pn": patent.get("publication_number", pn),
+            "title": patent.get("title", ""),
+        },
+    }
+
+    if direction in ("backward", "both"):
+        response["backward_citations"] = backward
+        response["backward_count"] = len(backward)
+    if direction in ("forward", "both"):
+        response["forward_citations"] = forward
+        response["forward_count"] = len(forward)
+
+    return check_and_truncate(response)
 
 
 # =====================================================================

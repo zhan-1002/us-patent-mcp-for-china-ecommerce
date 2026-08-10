@@ -50,7 +50,7 @@ dev = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["patent_mcp_server", "patent_mcp_server.uspto", "patent_mcp_server.util", "patent_mcp_server.patentsview"]
+packages = ["patent_mcp_server", "patent_mcp_server.uspto", "patent_mcp_server.util", "patent_mcp_server.patentsview", "patent_mcp_server.google"]
 
 [tool.setuptools.package-data]
 patent_mcp_server = ["json/*.json"]

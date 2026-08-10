@@ -383,6 +383,42 @@ DATA_SOURCES = {
             "Patent enforcement patterns (UNAVAILABLE - use OCE bulk dataset)",
         ],
     },
+    "google_patents": {
+        "name": "Google Patents",
+        "base_url": "https://patents.google.com",
+        "description": (
+            "Google Patents XHR API provides ML-ranked patent search with "
+            "dedicated design patent faceting. No authentication required. "
+            "Rate-limited aggressively — minimum 2-second delay between "
+            "requests is enforced by the client."
+        ),
+        "coverage": {
+            "patents": "US and international patents, design and utility",
+            "applications": "Published applications (via search)",
+            "images": "Thumbnail and drawing images via patentimages.storage.googleapis.com",
+        },
+        "rate_limits": (
+            "IP-based rate limiting after ~9 rapid requests (503 ban, "
+            "30 min - 2 hr). Client enforces Semaphore(1) + >=2s delay."
+        ),
+        "auth_required": False,
+        "best_for": [
+            "Design patent search (superior ML ranking + type=DESIGN facet)",
+            "Citation graph browsing (forward/backward citations)",
+            "ML-based similar patent discovery",
+            "Supplementing PPUBS when keyword search misses short-title patents",
+            "Visual patent landscape exploration",
+        ],
+        "supplements": "ppubs",
+        "note": (
+            "Google Patents is a SUPPLEMENTARY source. Use PPUBS for full "
+            "claims text, PDF downloads, and authoritative USPTO data. "
+            "Use Google Patents for design patent discovery, citation "
+            "browsing, and ML-ranked search. The two engines complement "
+            "each other: Google finds relevant design patents that PPUBS "
+            "TF-IDF search misses; PPUBS provides the complete legal text."
+        ),
+    },
 }
 
 # Search Query Syntax Guide
@@ -465,6 +501,37 @@ PatentsView uses JSON query syntax:
 3. **Use wildcards carefully**: wildcard* searches can be slow
 4. **Filter by date**: Narrow results with date ranges
 5. **Use CPC codes**: Most precise for technology areas
+
+---
+
+## Google Patents (XHR Query API)
+
+Google Patents uses URL-encoded query parameters:
+
+### Query Syntax (inside `q=` parameter):
+- Quoted phrases: `"wooden cross"`
+- Boolean operators: `AND`, `OR`
+- Field filters: `inventor:"Name"`, `assignee:"Company"`, `cpc:"G06N3/08"`
+- Date filters: `before:20200101`, `after:20150101`
+
+### Facet Filters (separate URL params):
+- `type=DESIGN` — Design patents only (critical for design patent search)
+- `type=PATENT` — Utility patents only
+- `country=US` — US jurisdiction
+- `language=ENGLISH` — English language results
+- `num=N` — Results per page (max ~100)
+
+### Example Queries:
+- `q="wooden cross"&type=DESIGN&country=US` — Design patent cross search
+- `q=inventor:"Smith" AND cpc:"D11/96"` — Jewelry design patents by inventor
+- `q="machine learning"&type=PATENT&country=US&language=ENGLISH`
+
+### Important Notes:
+- Google Patents ranking is ML-based, NOT TF-IDF — better for short-text design patents
+- Rate limiting is aggressive: maintain >=2s between requests
+- No authentication required, but IP bans are common with rapid requests
+- Only 10 results are typically accessible per query (paginated via cluster/result structure)
+- For full patent text, always fall back to PPUBS (Google Patents lacks complete claims)
 """
 
 

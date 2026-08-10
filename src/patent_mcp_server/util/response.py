@@ -186,6 +186,46 @@ class ResponseEnvelope:
         )
 
     @staticmethod
+    def from_google(
+        raw_response: Dict[str, Any],
+        offset: int = 0,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Normalize a Google Patents XHR API response.
+
+        Args:
+            raw_response: Raw response dict from GooglePatentsClient.search()
+            offset: Requested offset
+            limit: Requested limit
+
+        Returns:
+            Standardized response envelope
+        """
+        # Google Patents client already normalizes — this is a pass-through
+        # that ensures the envelope has the standard fields.
+        results = raw_response.get("results", [])
+        total = raw_response.get("total", len(results))
+        count = raw_response.get("count", len(results))
+
+        envelope = ResponseEnvelope.success(
+            results=results,
+            source="google_patents",
+            count=count,
+            total=total,
+            offset=offset,
+            limit=limit,
+            metadata={
+                "query": raw_response.get("query"),
+                "type_filter": raw_response.get("type_filter"),
+                "google_total": (raw_response.get("metadata") or {}).get("google_total"),
+            },
+        )
+        # Preserve the "hint" if the search already provides one
+        if raw_response.get("hint"):
+            envelope["hint"] = raw_response["hint"]
+        return envelope
+
+    @staticmethod
     def from_ptab(
         raw_response: Dict[str, Any],
         offset: int = 0,

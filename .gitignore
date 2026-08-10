@@ -21,5 +21,7 @@ wheels/
 # Configuration files
 .env
 
+# Vendored packages
+.packages/
 # Claude Code
 .claude
