@@ -1,1 +1,9 @@
-{"mcpServers":{"patsnap-search":{"type":"http","url":"https://connect.zhihuiya.com/f176d7/mcp?apikey=sk-8IhU8Uf1QmvMc9anye4MzChkHNN8V9Yd5JZNW64ljQu2vQJP","description":"Patsnap search"},"patsnap-design":{"type":"http","url":"https://connect.zhihuiya.com/937ec6/mcp?apikey=sk-8IhU8Uf1QmvMc9anye4MzChkHNN8V9Yd5JZNW64ljQu2vQJP","description":"Patsnap design"}}}
+{
+  "mcpServers": {
+    "patents": {
+      "command": "uv",
+      "args": ["run", "patent-mcp-server"],
+      "description": "USPTO and Google Patents search optimized for Codex"
+    }
+  }
+}

@@ -4,7 +4,7 @@ MCP Prompts for USPTO Patent Server (PPUBS + Google Patents).
 Prompts provide reusable workflow templates for common patent research tasks.
 Users can access these via / commands.
 
-All prompts reference only the 20 tools registered in this server:
+All prompts reference only tools registered in this server:
   PPUBS: ppubs_search_patents, ppubs_search_applications, ppubs_get_full_document,
          ppubs_get_patent_by_number, ppubs_download_patent_pdf, ppubs_search_by_ttl,
          ppubs_search_by_inventor, ppubs_search_by_assignee, ppubs_search_combined,
@@ -12,6 +12,8 @@ All prompts reference only the 20 tools registered in this server:
          ppubs_get_citation_network
   Google: gp_search_patents, gp_get_patent_detail, gp_get_similar_patents,
           gp_get_citations
+  Aggregate: patent_search_aggregated, patent_evaluate_recall
+  Trademark: tmsearch_search, tmsearch_get_by_serial
   Utility: check_api_status, get_cpc_info, get_status_code
 """
 
@@ -342,8 +344,26 @@ proven strategies for finding product-related patents.
 | `gp_get_similar_patents` | ML-based visual/CPC similarity | `gp_get_similar_patents("D656429")` |
 | `ppubs_search_by_ttl` | Exact title matching | `ppubs_search_by_ttl("self watering pot")` |
 | `ppubs_search_by_assignee` | Track company patent families | `ppubs_search_by_assignee("Soak Limited", "smoker")` |
+| `patent_search_aggregated` | Comprehensive multi-page retrieval | `patent_search_aggregated(["wooden cross", "religious cross"], baseline_name="religious_cross")` |
+| `patent_evaluate_recall` | Verify no old-tool candidates were lost | `patent_evaluate_recall(["D1066113"], baseline_name="religious_cross")` |
 
 ## Recommended Workflow
+
+### Phase 0: Comprehensive Retrieval (Codex recommended)
+```
+patent_search_aggregated(
+  queries=["product phrase", "synonym", "functional phrase"],
+  type="DESIGN",
+  sources="BOTH",
+  max_results=300,
+  page_size=100,
+  max_pages=3
+)
+```
+- Prefer the returned `codex_markdown` for the chat response.
+- Do not dump the full `results` array unless the user requests it.
+- A short comparison table is a display limit, not a retrieval limit.
+- When a historical baseline exists, require `recall.regression_pass=true` or explicitly report every missing patent.
 
 ### Phase 1: Discovery (Google Patents)
 ```
@@ -392,6 +412,9 @@ ppubs_get_citation_network("D656429")              → finds ALL 8+ family membe
 | PPUBS-only for design | TF-IDF bad for short titles | Use `gp_search_patents` for design discovery |
 | Skip inventor tracking | Misses related patents | Run `ppubs_get_inventor_patents` on top matches |
 | Filter stop words | PPUBS needs exact phrase | Keep original phrasing |
+| Treat first page as complete | Low recall and missed historical candidates | Use `patent_search_aggregated` with bounded pagination |
+| Dump raw JSON into chat | Hard to compare candidates in Codex | Present `codex_markdown`, then offer full results |
+| Ignore old-tool results | Silent recall regression | Run the matching historical recall baseline |
 """
 
 # Map of prompt names to content

@@ -208,8 +208,9 @@ class ResponseEnvelope:
         # Google Patents client already normalizes — this is a pass-through
         # that ensures the envelope has the standard fields.
         results = raw_response.get("results", [])
+        results = results[:limit] if limit and limit > 0 else results
         total = raw_response.get("total", len(results))
-        count = raw_response.get("count", len(results))
+        count = len(results)
 
         envelope = ResponseEnvelope.success(
             results=results,
