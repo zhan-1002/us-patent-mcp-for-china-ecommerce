@@ -1,8 +1,8 @@
 <div align="center">
 
-# US Patent MCP for China E-commerce
+# 电商专利 Scout MCP
 
-### USPTO PPUBS × Google Patents × Codex
+### E-commerce Patent Scout MCP
 
 面向跨境电商商品调研的美国专利检索 MCP Server：支持多关键词、多来源、连续分页、引用扩展和历史召回评估。
 
@@ -74,8 +74,8 @@ Codex 重点专利对比表
 ### 安装并启动
 
 ```bash
-git clone https://github.com/zhan-1002/us-patent-mcp-for-china-ecommerce.git
-cd us-patent-mcp-for-china-ecommerce
+git clone https://github.com/zhan-1002/ecommerce-patent-scout-mcp.git
+cd ecommerce-patent-scout-mcp
 
 uv sync
 uv run patent-mcp-server
@@ -133,7 +133,7 @@ uv run patent-mcp-server
 ### Claude Code 配置
 
 ```shell
-claude mcp add-json patents '{"command":"uv","args":["--directory","/path/to/us-patent-mcp-for-china-ecommerce","run","patent-mcp-server"]}'
+claude mcp add-json patents '{"command":"uv","args":["--directory","/path/to/ecommerce-patent-scout-mcp","run","patent-mcp-server"]}'
 ```
 
 Windows 用户请将 `/path/to/...` 替换为仓库绝对路径。
@@ -149,7 +149,7 @@ Windows 用户请将 `/path/to/...` 替换为仓库绝对路径。
       "command": "uv",
       "args": [
         "--directory",
-        "/path/to/us-patent-mcp-for-china-ecommerce",
+        "/path/to/ecommerce-patent-scout-mcp",
         "run",
         "patent-mcp-server"
       ]

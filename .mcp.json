@@ -3,7 +3,7 @@
     "patents": {
       "command": "uv",
       "args": ["run", "patent-mcp-server"],
-      "description": "USPTO and Google Patents search optimized for Codex"
+      "description": "E-commerce Patent Scout MCP optimized for Codex"
     }
   }
 }

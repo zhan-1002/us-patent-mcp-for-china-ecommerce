@@ -1,5 +1,5 @@
 """
-USPTO Patent & Trademark Search MCP Server
+E-commerce Patent Scout MCP
 
 This file provides a Model Context Protocol (MCP) server that exposes tools for interacting
 with USPTO patent and trademark data APIs:
@@ -61,7 +61,7 @@ with warnings.catch_warnings():
         "ignore",
         message=r"Field 'lifespan' has an incomplete definition.*",
     )
-    mcp = FastMCP("uspto_patent_tools", lifespan=server_lifespan)
+    mcp = FastMCP("ecommerce_patent_scout", lifespan=server_lifespan)
 
 # Set up logging with configured level
 logging.basicConfig(
@@ -92,7 +92,7 @@ async def cleanup():
     if _cleanup_complete:
         return
 
-    logger.info("Shutting down USPTO Patent MCP server, cleaning up resources...")
+    logger.info("Shutting down E-commerce Patent Scout MCP, cleaning up resources...")
     try:
         await ppubs_client.close()
         await gp_client.close()
@@ -2305,7 +2305,7 @@ def main():
     import argparse
     import os
 
-    parser = argparse.ArgumentParser(description="USPTO Patent MCP Server")
+    parser = argparse.ArgumentParser(description="E-commerce Patent Scout MCP")
     parser.add_argument(
         "--transport",
         type=str,
@@ -2325,13 +2325,13 @@ def main():
     if args.transport == "sse":
         # Set port via environment variable for uvicorn
         os.environ["PORT"] = str(args.port)
-        logger.info(f"Starting USPTO Patent MCP server with SSE transport on port {args.port}")
+        logger.info(f"Starting E-commerce Patent Scout MCP with SSE transport on port {args.port}")
         # SSE transport for remote access (Cherry Studio)
         # FastMCP SSE runs on http://127.0.0.1:8000 by default
         # Use Nginx reverse proxy for external access
         mcp.run(transport="sse")
     else:
-        logger.info("Starting USPTO Patent MCP server with stdio transport")
+        logger.info("Starting E-commerce Patent Scout MCP with stdio transport")
         # stdio transport for local access (Claude Code)
         mcp.run(transport="stdio")
 
