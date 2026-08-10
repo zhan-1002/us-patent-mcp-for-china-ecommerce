@@ -139,6 +139,7 @@ class GooglePatentsClient:
         self._semaphore = asyncio.Semaphore(1)
         self._last_request_time: float = 0.0
         self._session_ready: bool = False
+        self._session_reachable: bool = False
 
         # Browser-like base headers for the home page
         self._page_headers = {
@@ -168,9 +169,12 @@ class GooglePatentsClient:
         Returns:
             ``True`` if the home page was successfully reached (any HTTP status),
             ``False`` if a connection-level error occurred (DNS, timeout, etc.).
+            Once a failure is recorded the method returns the cached ``False``
+            without retrying — this prevents repeated timeouts in search flows
+            while still allowing health checks to observe the real state.
         """
         if self._session_ready:
-            return True
+            return self._session_reachable
 
         logger.info("Establishing Google Patents session (visiting home page)")
         try:
@@ -185,10 +189,12 @@ class GooglePatentsClient:
             )
             # 200 or even a redirect/error page — we just need the cookies.
             self._session_ready = True
+            self._session_reachable = True
             return True
         except Exception as exc:
             logger.warning("Home-page visit failed (%s); continuing anyway", exc)
-            self._session_ready = True  # don't keep retrying
+            self._session_ready = True   # don't keep retrying
+            self._session_reachable = False
             return False
 
     def _xhr_headers(self) -> Dict[str, str]:
