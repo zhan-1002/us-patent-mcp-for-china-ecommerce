@@ -1,14 +1,15 @@
 """
-USPTO Patent Search MCP Server (PPUBS Only)
+USPTO Patent & Trademark Search MCP Server
 
 This file provides a Model Context Protocol (MCP) server that exposes tools for interacting
-with the USPTO Patent Public Search (PPUBS) API:
+with USPTO patent and trademark data APIs:
 
 - ppubs.uspto.gov - Full text patent documents, PDF downloads, and advanced search
+- tmsearch.uspto.gov - Full-text trademark search (undocumented internal API, no API key)
 
 The server uses stdio transport for Claude Code/Cursor integration.
 
-Version: 1.0.0 - PPUBS-only focus (no API key required)
+Version: 0.10.0 - Added trademark search support (no API key required)
 """
 import atexit
 import json
@@ -32,6 +33,7 @@ from patent_mcp_server.resources import (
 )
 from patent_mcp_server.prompts import get_prompt
 from patent_mcp_server.uspto.ppubs_uspto_gov import PpubsClient
+from patent_mcp_server.uspto.tmsearch_client import TmSearchClient
 
 # Initialize FastMCP server
 mcp = FastMCP("uspto_patent_tools")
@@ -50,6 +52,9 @@ config.validate()
 # Create client instance for PPUBS API
 ppubs_client = PpubsClient()
 
+# Create client instance for Trademark Search API
+tmsearch_client = TmSearchClient()
+
 
 # Register cleanup handler
 async def cleanup():
@@ -57,9 +62,15 @@ async def cleanup():
     logger.info("Shutting down USPTO Patent MCP server, cleaning up resources...")
     try:
         await ppubs_client.close()
-        logger.info("Cleanup completed successfully")
+        logger.info("PPUBS cleanup completed")
     except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
+        logger.error(f"Error during PPUBS cleanup: {str(e)}")
+    try:
+        await tmsearch_client.close()
+        logger.info("TmSearch cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during TmSearch cleanup: {str(e)}")
+    logger.info("Cleanup completed successfully")
 
 
 # Register cleanup with atexit (best effort for stdio shutdown)
@@ -242,6 +253,24 @@ async def product_patent_search() -> str:
     return get_prompt("product_patent_search")["content"]
 
 
+@mcp.prompt()
+async def patent_cross_validation() -> str:
+    """USPTO + Patsnap dual-source cross-validation workflow.
+
+    USE THIS PROMPT WHEN: You need comprehensive patent search with
+    cross-validation across independent data sources. Covers US patents
+    via USPTO and global patents (including China) via Patsnap.
+
+    This workflow:
+    - Runs both USPTO and Patsnap searches in parallel
+    - Cross-compares results to identify gaps
+    - Leverages Patsnap's image-based design search
+    - Expands coverage beyond US to Chinese patents
+    - Produces a confidence-rated cross-validation report
+    """
+    return get_prompt("patent_cross_validation")["content"]
+
+
 # =====================================================================
 # Helper Functions
 # =====================================================================
@@ -323,6 +352,8 @@ async def check_api_status() -> Dict[str, Any]:
             "ppubs_search_by_assignee",
             "ppubs_search_combined",
             "ppubs_get_inventor_patents",
+            "tmsearch_search",
+            "tmsearch_get_by_serial",
             "check_api_status",
             "get_cpc_info",
             "get_status_code",
@@ -333,6 +364,8 @@ async def check_api_status() -> Dict[str, Any]:
             "ppubs_search_by_assignee": "Find all patents by company",
             "ppubs_search_combined": "Multi-strategy search (recommended for new searches)",
             "ppubs_get_inventor_patents": "Auto inventor tracking from a patent",
+            "tmsearch_search": "US trademark full-text search (no API key)",
+            "tmsearch_get_by_serial": "Look up trademark by serial number",
         },
     }
 
@@ -532,7 +565,12 @@ async def ppubs_download_patent_pdf(patent_number: str) -> Dict[str, Any]:
         return search_result
 
     patent = search_result["patent"]
-    return await ppubs_client.download_image(patent[Fields.GUID], patent[Fields.TYPE])
+    return await ppubs_client.download_image(
+        patent[Fields.GUID],
+        patent.get(Fields.IMAGE_LOCATION, ""),
+        patent.get(Fields.PAGE_COUNT, 1),
+        patent[Fields.TYPE],
+    )
 
 
 # =====================================================================
@@ -1064,6 +1102,152 @@ async def ppubs_get_inventor_patents(patent_number: str) -> Dict[str, Any]:
         "related_patents": sorted_patents,
         "total": len(sorted_patents),
         "hint": f"Found {len(sorted_patents)} related patents from {len(applicants)} applicant(s)"
+    }
+
+
+# =====================================================================
+# Trademark Search Tools - tmsearch.uspto.gov (no API key required)
+# =====================================================================
+
+@mcp.tool()
+async def tmsearch_search(
+    query: str = None,
+    mark_text: str = None,
+    owner_name: str = None,
+    serial_number: str = None,
+    registration_number: str = None,
+    goods_services: str = None,
+    international_class: str = None,
+    status_filter: str = None,
+    offset: int = 0,
+    limit: int = 25,
+) -> Dict[str, Any]:
+    """Search US trademarks via tmsearch.uspto.gov (full-text, no API key).
+
+    USE THIS TOOL WHEN: You need to search US trademark records — find marks
+    by name, owner, serial/registration number, goods/services, or class.
+
+    This searches the same internal Elasticsearch index that powers the USPTO
+    trademark search web app (TESS replacement at tmsearch.uspto.gov). No API
+    key is required. Same risk profile as PPUBS: undocumented internal API,
+    may change without notice.
+
+    Args:
+        query: Raw Elasticsearch query_string (e.g., "Nike AND shoes").
+               Searches the wordmark field by default.
+        mark_text: Word mark text to match (e.g., "Apple", "Tesla")
+        owner_name: Owner/assignee name (e.g., "Microsoft", "Nike, Inc.")
+        serial_number: Exact 8-digit application serial number
+        registration_number: Exact registration number
+        goods_services: Terms to match in goods/services description
+                        (e.g., "footwear", "software")
+        international_class: Nice class number as string (e.g., "9", "25").
+                             Zero-padded to 3 digits internally.
+        status_filter: "live" for active marks, "dead" for expired/abandoned,
+                       or omit for both.
+        offset: Pagination offset (default: 0)
+        limit: Maximum results (default: 25, max: 100)
+
+    Returns:
+        {"results": [...], "total": N} with trademark records including
+        wordmark, serial number, owner, class, status, and dates.
+
+    Example:
+        tmsearch_search(mark_text="Nike", status_filter="live") → live NIKE marks
+        tmsearch_search(owner_name="Apple Inc.") → marks owned by Apple
+        tmsearch_search(serial_number="75187260") → exact serial lookup
+    """
+    # At least one search criterion is required
+    if not any([query, mark_text, owner_name, serial_number,
+                registration_number, goods_services, international_class]):
+        return ApiError.validation_error(
+            "At least one search criterion is required: query, mark_text, "
+            "owner_name, serial_number, registration_number, goods_services, "
+            "or international_class"
+        )
+
+    result = await tmsearch_client.search(
+        query=query,
+        mark_text=mark_text,
+        owner_name=owner_name,
+        serial_number=serial_number,
+        registration_number=registration_number,
+        goods_services=goods_services,
+        international_class=international_class,
+        status_filter=status_filter,
+        offset=offset,
+        limit=min(limit, 100),
+    )
+
+    if result.get("error", False):
+        return result
+
+    logo = "🔒" if status_filter == "live" else ("💀" if status_filter == "dead" else "🔍")
+    header = f"{logo} Trademark results {result['total']} total"
+    if mark_text:
+        header += f" for mark '{mark_text}'"
+    elif owner_name:
+        header += f" for owner '{owner_name}'"
+    elif serial_number:
+        header += f" for serial '{serial_number}'"
+
+    search_params = {
+        k: v for k, v in {
+            "query": query, "mark_text": mark_text, "owner_name": owner_name,
+            "serial_number": serial_number, "registration_number": registration_number,
+            "goods_services": goods_services, "international_class": international_class,
+            "status_filter": status_filter, "offset": offset
+        }.items() if v is not None
+    }
+
+    return {
+        "success": True,
+        "source": "tmsearch",
+        "search_params": search_params,
+        "total": result["total"],
+        "count": len(result["results"]),
+        "offset": offset,
+        "limit": limit,
+        "has_more": (offset + len(result["results"])) < result["total"],
+        "results": result["results"],
+        "header": header,
+        "hint": (
+            "Trademark records from tmsearch.uspto.gov. Serial numbers (id field) "
+            "can be used to look up full details at https://tsdr.uspto.gov/."
+        ),
+    }
+
+
+@mcp.tool()
+async def tmsearch_get_by_serial(serial_number: str) -> Dict[str, Any]:
+    """Get a trademark record by serial number from tmsearch.
+
+    USE THIS TOOL WHEN: You have a trademark serial number and need the
+    search-index record with mark text, owner, class, status, and dates.
+
+    Args:
+        serial_number: 8-digit trademark application serial number
+
+    Returns:
+        Single trademark record or error.
+    """
+    result = await tmsearch_client.get_by_serial(serial_number)
+
+    if result.get("error", False):
+        return result
+
+    if not result.get("results"):
+        return ApiError.not_found("Trademark", serial_number)
+
+    record = result["results"][0]
+    return {
+        "success": True,
+        "source": "tmsearch",
+        "serial_number": serial_number,
+        "record": record,
+        "wordmark": record.get("wordmark", "N/A"),
+        "owner": record.get("ownerFullText", "N/A"),
+        "status": record.get("statusDescription", "N/A"),
     }
 
 

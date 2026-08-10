@@ -17,12 +17,41 @@ class PatentNumberInput(BaseModel):
     @field_validator('patent_number')
     @classmethod
     def validate_patent_number(cls, v: str) -> str:
-        """Validate and clean patent number."""
-        # Remove any non-numeric characters
-        cleaned = ''.join(c for c in str(v) if c.isdigit())
-        if not cleaned:
-            raise ValueError("Patent number must contain at least one digit")
-        return cleaned
+        """Validate and clean patent number.
+
+        Preserves design/plant/reissue prefixes (D, PP, RE) while stripping
+        country codes (US), kind codes (B2, S1, A1), and formatting characters.
+
+        Accepts: D1066113, D1066113S, USD1066113S1, US D1066113 S,
+                 12345678, 12345678B2, US12345678B2, US 12345678 S.
+        """
+        import re
+
+        pn = str(v).strip()
+        if not pn:
+            raise ValueError("Patent number cannot be empty")
+
+        # US + optional space + body with optional letter prefix + optional kind code
+        # e.g. US D1066113 S, USD1066113S1, US12345678B2, US 12345678 S
+        m = re.match(r'^US\s*([A-Z]{0,2}\d+)(?:\s*[A-Z]\d*)?$', pn)
+        if m:
+            result = m.group(1)
+            if result and any(c.isdigit() for c in result):
+                return result
+
+        # Body with optional letter prefix + optional kind code
+        # e.g. D1066113S, 12345678B2, D1066113, 12345678, PP12345
+        m = re.match(r'^([A-Z]{0,2}\d+)(?:\s*[A-Z]\d*)?$', pn)
+        if m:
+            result = m.group(1)
+            if result and any(c.isdigit() for c in result):
+                return result
+
+        raise ValueError(
+            f"Unrecognized patent number format: {v!r}. "
+            f"Expected formats: 'D1066113', 'USD1066113S1', "
+            f"'US D1066113 S', '12345678', or 'US12345678B2'."
+        )
 
 
 class ApplicationNumberInput(BaseModel):

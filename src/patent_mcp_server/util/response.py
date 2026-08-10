@@ -95,10 +95,14 @@ class ResponseEnvelope:
         results = raw_response.get("patents", [])
         total = raw_response.get("numFound", len(results))
 
+        # Respect the requested limit — PPUBS may return more rows than
+        # pageCount due to multi-source aggregation or beFamily expansion.
+        sliced = results[:limit] if limit and limit > 0 else results
+
         return ResponseEnvelope.success(
-            results=results,
+            results=sliced,
             source="ppubs",
-            count=len(results),
+            count=len(sliced),
             total=total,
             offset=offset,
             limit=limit,
