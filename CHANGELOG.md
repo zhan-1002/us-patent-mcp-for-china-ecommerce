@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 - Unreleased
+## 1.1.0 - 2026-08-10
 
 ### Codex experience
 
@@ -26,4 +26,4 @@
 - Tool count: 24.
 - Prompt count: 6.
 - Fixed resources: 5, plus existing resource templates.
-- No commit or publication is performed as part of this unreleased development work.
+- Published as the first E-commerce Patent Scout MCP release.
