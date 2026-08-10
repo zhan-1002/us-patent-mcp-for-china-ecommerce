@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "patent-mcp-server"
 version = "1.1.0"
-description = "Model Context Protocol server for USPTO patent data"
+description = "E-commerce patent scouting MCP with multi-source US search, citation discovery, and recall evaluation"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = "MIT"
 authors = [
     {name = "riemannzeta", email = "noreply@github.com"}
 ]
-keywords = ["mcp", "model-context-protocol", "uspto", "patent", "patent-search", "api"]
+keywords = ["mcp", "model-context-protocol", "e-commerce", "uspto", "google-patents", "patent", "patent-search", "recall-evaluation"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -37,9 +37,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zhan-1002/us-patent-mcp-for-china-ecommerce"
-Repository = "https://github.com/zhan-1002/us-patent-mcp-for-china-ecommerce"
-Issues = "https://github.com/zhan-1002/us-patent-mcp-for-china-ecommerce/issues"
+Homepage = "https://github.com/zhan-1002/ecommerce-patent-scout-mcp"
+Repository = "https://github.com/zhan-1002/ecommerce-patent-scout-mcp"
+Issues = "https://github.com/zhan-1002/ecommerce-patent-scout-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
