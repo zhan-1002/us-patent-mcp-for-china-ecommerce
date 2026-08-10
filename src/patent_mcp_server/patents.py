@@ -302,17 +302,53 @@ async def check_api_status() -> Dict[str, Any]:
     USE THIS TOOL WHEN: You want to verify the patent search API
     is available before starting research.
 
+    Performs a lightweight connectivity check against PPUBS (session
+    establishment) and returns configuration plus live status for both
+    PPUBS and Google Patents engines.
+
     Returns:
         Status of the PPUBS API including configuration and availability.
     """
+    # ── Lightweight PPUBS connectivity check ──────────────────────────
+    ppubs_reachable = False
+    ppubs_check_error = None
+    try:
+        session = await ppubs_client.get_session()
+        ppubs_reachable = session is not None
+        if not ppubs_reachable:
+            ppubs_check_error = "Session establishment returned None (API may be down or unreachable)"
+    except Exception as exc:
+        ppubs_check_error = f"Connectivity check failed: {exc}"
+
+    # ── Google Patents reachability check ─────────────────────────────
+    gp_reachable = False
+    gp_check_error = None
+    try:
+        await gp_client._ensure_session()
+        # If _ensure_session didn't raise, the home page is reachable
+        gp_reachable = True
+    except Exception as exc:
+        gp_check_error = f"Connectivity check failed: {exc}"
+
     return {
         "success": True,
+        "connectivity": {
+            "ppubs": ppubs_reachable,
+            "google_patents": gp_reachable,
+        },
+        "connectivity_errors": {
+            k: v for k, v in [
+                ("ppubs", ppubs_check_error),
+                ("google_patents", gp_check_error),
+            ] if v is not None
+        } or None,
         "sources": {
             "ppubs": {
                 "name": "Patent Public Search",
                 "configured": True,
                 "requires_auth": False,
                 "description": "Full-text search of US patents and applications",
+                "reachable": ppubs_reachable,
             },
             "google_patents": {
                 "name": "Google Patents",
@@ -320,6 +356,7 @@ async def check_api_status() -> Dict[str, Any]:
                 "requires_auth": False,
                 "description": "ML-ranked patent search with design patent faceting — supplements PPUBS",
                 "rate_limit_note": "Enforces >=2s delay between requests to avoid 503 bans",
+                "reachable": gp_reachable,
             },
         },
         "tools_available": [
@@ -1346,35 +1383,52 @@ async def ppubs_get_cited_by(patent_number: str, max_results: int = 50) -> Dict[
     if not patents:
         return ApiError.not_found("Patent references to", pn)
 
-    # Check each result's citations for the target patent
+    # The .urpn. query already selected patents that cite the target.
+    # We inspect the search result's urpn fields when available for verification
+    # certainty, but if urpn data is absent from the basic search record we still
+    # trust the query hit (marking it unverified).
     citing_patents = []
     checked = 0
     for patent in patents[:max_results]:
         checked += 1
         patent_pn = patent.get("documentId", patent.get("patentNumber", ""))
-        # Skip the patent itself
-        if pn in str(patent_pn):
+        # Skip the patent itself — use normalized equality, not substring
+        if _normalize_pn(str(pn)) == _normalize_pn(str(patent_pn)):
             continue
 
-        # Check if this patent cites the target (backward references)
+        # Try to verify via urpn fields in the search result
         refs = _extract_backward_citation_pns(patent)
-        if any(_normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs):
-            citing_patents.append({
-                "pn": patent_pn,
-                "title": patent.get("inventionTitle", patent.get("title", "")),
-                "date": patent.get("datePublished", ""),
-                "type": "design" if _is_design_patent(patent_pn) else "utility",
-            })
+        verified = False
+        if refs:
+            # urpn data is present — verify the target is among them
+            if any(_normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs):
+                verified = True
+        else:
+            # urpn not expanded in basic search result — trust the .urpn. query hit
+            verified = False
 
+        citing_patents.append({
+            "pn": patent_pn,
+            "title": patent.get("inventionTitle", patent.get("title", "")),
+            "date": patent.get("datePublished", ""),
+            "type": "design" if _is_design_patent(patent_pn) else "utility",
+            "verified": verified,
+        })
+
+    verified_count = sum(1 for c in citing_patents if c["verified"])
     return {
         "success": True,
         "source": "ppubs",
         "patent": {"pn": pn},
         "cited_by": citing_patents,
         "count": len(citing_patents),
+        "verified_count": verified_count,
         "checked": checked,
         "hint": (
-            f"Found {len(citing_patents)} citing patents out of {checked} search results. "
+            f"Found {len(citing_patents)} citing patents out of {checked} search results "
+            f"({verified_count} verified via urpn fields, "
+            f"{len(citing_patents) - verified_count} from .urpn. query hit without expanded urpn). "
+            f"Use ppubs_get_citations() on individual results for definitive citation data."
             f"Note: urpn data may not be present in basic search results — "
             f"use ppubs_get_citations() on individual results for definitive citation data."
         ),
@@ -1436,6 +1490,7 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
     backward_refs: list = []
     backward_designs: list = []
     backward_utilities: list = []
+    backward_warning = None
 
     if guid:
         doc = await ppubs_client.get_document(guid, doc_type)
@@ -1448,6 +1503,10 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
                     backward_designs.append(rp)
                 else:
                     backward_utilities.append(rp)
+        else:
+            backward_warning = f"Backward citation extraction failed for {document_id}: {doc.get('message', 'unknown error')}"
+    else:
+        backward_warning = f"No GUID found for {document_id} — backward citations unavailable"
 
     # ── 2. Forward citations (.urpn. search) ───────────────────────────
     fwd_query = f'"{pn}".urpn.'
@@ -1457,7 +1516,9 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
         limit=max_forward,
         sort="date_publ desc",
     )
+    forward_warning = None
     if is_error(fwd_result):
+        forward_warning = f"Forward citation query failed: {fwd_result.get('message', 'unknown error')}"
         fwd_result = {Fields.PATENTS: []}
 
     fwd_patents = fwd_result.get(Fields.PATENTS, fwd_result.get(Fields.DOCS, []))
@@ -1469,28 +1530,40 @@ async def ppubs_get_citation_network(patent_number: str, max_forward: int = 50) 
     for fp in fwd_patents[:max_forward]:
         checked += 1
         fp_pn = fp.get("documentId", fp.get("patentNumber", ""))
-        if pn in str(fp_pn):
-            continue  # skip self
-        # Verify this patent cites the target (backward references)
+        # Skip self — normalized equality comparison
+        if _normalize_pn(str(pn)) == _normalize_pn(str(fp_pn)):
+            continue
+
+        # Trust .urpn. query hits; verify via urpn fields when available
         refs = _extract_backward_citation_pns(fp)
-        if any(_normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs):
-            entry = {
-                "pn": fp_pn,
-                "title": fp.get("inventionTitle", fp.get("title", "")),
-                "date": fp.get("datePublished", ""),
-                "type": "design" if _is_design_patent(fp_pn) else "utility",
-            }
-            forward_refs.append(entry)
-            if _is_design_patent(fp_pn):
-                forward_designs.append(fp_pn)
-            else:
-                forward_utilities.append(fp_pn)
+        verified = bool(refs) and any(
+            _normalize_pn(str(pn)) == _normalize_pn(str(r)) for r in refs
+        )
+        entry = {
+            "pn": fp_pn,
+            "title": fp.get("inventionTitle", fp.get("title", "")),
+            "date": fp.get("datePublished", ""),
+            "type": "design" if _is_design_patent(fp_pn) else "utility",
+            "verified": verified,
+        }
+        forward_refs.append(entry)
+        if _is_design_patent(fp_pn):
+            forward_designs.append(fp_pn)
+        else:
+            forward_utilities.append(fp_pn)
 
     # ── 3. Merge ───────────────────────────────────────────────────────
     total_backward = len(backward_refs)
     total_forward = len(forward_refs)
     total_designs = len(backward_designs) + len(forward_designs)
     total_utilities = len(backward_utilities) + len(forward_utilities)
+
+    # Build warnings for partial results
+    warnings = []
+    if backward_warning:
+        warnings.append(backward_warning)
+    if forward_warning:
+        warnings.append(forward_warning)
 
     # Build a one-line family summary
     summary_parts = [f"{pn} ({title[:60]})"]
