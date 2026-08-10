@@ -8,6 +8,9 @@ wheels/
 
 # Test results
 .pytest_cache
+.coverage
+coverage.json
+htmlcov/
 
 # Jupyter-generated files
 .ipynb_checkpoints/

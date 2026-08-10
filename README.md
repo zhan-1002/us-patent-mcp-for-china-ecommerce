@@ -9,9 +9,13 @@
 [![Version](https://img.shields.io/badge/version-1.1.0-2563eb?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.10--3.13-3776ab?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![MCP](https://img.shields.io/badge/MCP-compatible-7c3aed?style=flat-square)](https://modelcontextprotocol.io/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/zhan-1002/ecommerce-patent-scout-mcp/tests.yml?branch=main&style=flat-square&label=tests)](https://github.com/zhan-1002/ecommerce-patent-scout-mcp/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/zhan-1002/ecommerce-patent-scout-mcp?style=flat-square)](https://github.com/zhan-1002/ecommerce-patent-scout-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-16a34a?style=flat-square)](LICENSE.md)
 
 **[快速开始](#快速开始) · [Codex 配置](#codex-配置推荐) · [工具目录](#工具目录) · [搜索方法](#推荐搜索方法) · [故障排查](#故障排查)**
+
+**教程： [中文](docs/quickstart.zh-CN.md) · [English](docs/quickstart.en.md) · [真实召回案例](docs/case-study-religious-cross.md)**
 
 </div>
 
@@ -52,6 +56,12 @@ Codex 重点专利对比表
 | 历史召回评估 | 防止新版本漏掉旧工具已发现的重点候选 | `patent_evaluate_recall` |
 | Codex 专用输出 | 减少大段 JSON，优先展示可点击的重点结果 | `codex_markdown` |
 | 有界请求预算 | 控制分页数量、网络调用和聊天等待时间 | `max_pages` / `max_requests` |
+
+### 一个真实的召回改进
+
+`religious_cross` 历史样本包含5件重点外观专利。关键词和标题检索最初只找到4件；新版从 `D656429` 的真实引用网络中发现标题过于宽泛的 `D1050666`，最终达到5/5召回。整个过程使用14次网络请求，合并得到114件设计候选，没有把预期专利号注入查询。
+
+[阅读完整案例与适用边界 →](docs/case-study-religious-cross.md)
 
 ### 项目定位
 
