@@ -160,3 +160,50 @@ def validate_app_number(app_num: str) -> str:
         return validated.app_num
     except Exception as e:
         raise ValueError(f"Invalid application number: {str(e)}")
+
+
+def validate_google_pn(patent_number: str) -> str:
+    """Validate and normalize a patent number for Google Patents queries.
+
+    Accepts any common format (Google, PPUBS, or plain) and returns the
+    plain form (e.g. ``"D1066113"``).
+
+    Args:
+        patent_number: Patent number in any format:
+            - Google: ``"USD1066113S1"``
+            - PPUBS:  ``"US D1066113 S"``
+            - Plain:  ``"D1066113"``
+
+    Returns:
+        Plain patent number (e.g. ``"D1066113"``).
+
+    Raises:
+        ValueError: If the patent number doesn't match any known format.
+    """
+    import re
+
+    pn = str(patent_number).strip()
+    if not pn:
+        raise ValueError("Patent number cannot be empty")
+
+    # Already plain: D + digits (design) or just digits (utility)
+    if re.match(r"^[A-Z]\d+$", pn):
+        return pn
+    if re.match(r"^\d+$", pn):
+        return pn
+
+    # Google format: USD1066113S1 (design) or US12345678B2 (utility)
+    # Body may start with a letter (design) or be purely numeric (utility).
+    m = re.match(r"^US([A-Z]?\d+)[A-Z]\d*$", pn)
+    if m:
+        return m.group(1)
+
+    # PPUBS format: US D1066113 S or US 12345678 S
+    m = re.match(r"^US\s+([A-Z]?\d+)\s+[A-Z]\d*$", pn)
+    if m:
+        return m.group(1)
+
+    raise ValueError(
+        f"Unrecognized patent number format: {patent_number!r}. "
+        f"Expected formats: 'D1066113', 'USD1066113S1', '12345678', 'US12345678B2', or 'US D1066113 S'."
+    )
